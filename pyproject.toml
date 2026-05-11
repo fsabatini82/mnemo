@@ -1,0 +1,111 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mnemo"
+version = "0.1.0"
+description = "Organizational memory MCP server — local RAG over private project knowledge for IDE coding agents."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Fabio Sabatini" }]
+license = { text = "MIT" }
+keywords = ["mcp", "rag", "llm", "copilot", "knowledge-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "chromadb>=0.5.0",
+    "fastembed>=0.4.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.5.0",
+    "langchain-text-splitters>=0.3.0",
+    "tiktoken>=0.7.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+lance = [
+    "lancedb>=0.13.0",
+    "pyarrow>=17.0.0",
+    "tantivy>=0.22.0",
+]
+llamaindex = [
+    "llama-index-core>=0.11.0",
+    "llama-index-embeddings-fastembed>=0.2.0",
+    "llama-index-vector-stores-chroma>=0.2.0",
+]
+full = [
+    "mnemo[lance,llamaindex]",
+    "llama-index-vector-stores-lancedb>=0.2.0",
+]
+dev = [
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+mnemo-server = "mnemo.mcp_server:main"
+mnemo-ingest = "mnemo.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fsabatini82/mnemo"
+Issues = "https://github.com/fsabatini82/mnemo/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mnemo"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=mnemo --cov-report=term-missing --cov-report=html --cov-fail-under=80"
+
+[tool.coverage.run]
+source = ["src/mnemo"]
+branch = true
+omit = [
+    # MCP server has module-level side effects (server init); covered by
+    # integration testing, not unit tests.
+    "src/mnemo/mcp_server.py",
+    # Optional pipelines / stores — installed only with `[lance]` / `[llamaindex]` extras.
+    "src/mnemo/pipelines/llamaindex.py",
+    "src/mnemo/stores/lance_store.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+]
+show_missing = true
+skip_covered = false
+precision = 2
