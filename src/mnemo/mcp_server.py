@@ -12,6 +12,7 @@ generate code).
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -140,11 +141,36 @@ def _hit_to_dict(h: Any) -> dict[str, Any]:
     }
 
 
+_TTY_USAGE_HINT = """\
+mnemo-server is an MCP stdio server.
+
+It is meant to be launched by an MCP client (e.g. GitHub Copilot via
+.vscode/mcp.json, or Claude Code via `claude mcp add`), not from an
+interactive terminal — stdin must carry JSON-RPC messages.
+
+To verify the install instead, run:
+  mnemo-ingest --help        (real CLI with --help support)
+  where mnemo-server         (Windows: print the executable path)
+  which mnemo-server         (Linux/macOS: print the executable path)
+
+Override with --force-stdio if you really want to start the stdio loop
+manually (e.g. to debug a client).
+"""
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Friendly guard: if invoked interactively (stdin attached to a TTY)
+    # the user almost certainly didn't mean to launch the stdio loop.
+    # Print a hint and exit cleanly instead of crashing on the first
+    # non-JSON-RPC bytes the terminal sends.
+    force = "--force-stdio" in sys.argv[1:]
+    if sys.stdin.isatty() and not force:
+        sys.stderr.write(_TTY_USAGE_HINT)
+        sys.exit(0)
     mcp.run()
 
 
