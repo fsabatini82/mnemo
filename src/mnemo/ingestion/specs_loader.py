@@ -52,7 +52,11 @@ def parse_spec(path: Path, root: Path) -> Document:
     # We keep the frontmatter inline in the indexed text so retrieval can
     # match on titles and tags, not just body content.
     indexed_text = _render_indexed_text(metadata, body)
-    return Document(id=doc_id, text=indexed_text, metadata=metadata)
+    # Vector stores only accept scalar metadata values (str | int | float |
+    # bool | None). YAML auto-coerces ISO dates into datetime.date and
+    # comma lists into Python lists — flatten everything before handing
+    # off to the store.
+    return Document(id=doc_id, text=indexed_text, metadata=_flatten_metadata(metadata))
 
 
 def load_specs(source_dir: Path) -> list[Document]:
@@ -79,6 +83,24 @@ def _infer_kind(path: Path, root: Path) -> str:
     if rel.startswith("adrs/"):
         return "adr"
     return "spec"
+
+
+def _flatten_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Coerce metadata values to scalars accepted by Chroma / LanceDB.
+
+    - None / bool / int / float / str → passthrough
+    - list / tuple → comma-joined string
+    - everything else (date, datetime, dict, custom objects) → str()
+    """
+    flat: dict[str, Any] = {}
+    for k, v in meta.items():
+        if v is None or isinstance(v, (bool, int, float, str)):
+            flat[k] = v
+        elif isinstance(v, (list, tuple)):
+            flat[k] = ", ".join(str(x) for x in v)
+        else:
+            flat[k] = str(v)
+    return flat
 
 
 def _render_indexed_text(metadata: dict[str, Any], body: str) -> str:
