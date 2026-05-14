@@ -66,6 +66,9 @@ Issues = "https://github.com/fsabatini82/mnemo/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mnemo"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/mnemo/ingestion/agents/copilot/prompts" = "mnemo/ingestion/agents/copilot/prompts"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
