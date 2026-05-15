@@ -1,8 +1,9 @@
-"""Mnemo CLI — agentic ingestion entry point.
+"""Mnemo CLI — ingestion entry point.
 
-Two subcommands feed the two knowledge axes. Each one is designed to be
-scheduled (Task Scheduler / cron / GitHub Actions cron) so the corpus
-stays in sync with the canonical source.
+Subcommands feed the knowledge axes for the configured (project, env).
+The first ingest for a new project auto-registers it in the project
+registry (`<persist_dir>/projects.json`). Server-side reads stay
+read-only and never touch the registry.
 
 Two ingestion modes, opt-in per invocation:
 
@@ -11,16 +12,13 @@ Two ingestion modes, opt-in per invocation:
 - **agentic copilot** (`--agentic copilot`): an LLM-powered agent
   driven by the GitHub Copilot CLI extracts structured metadata,
   classifies items as indexable vs noise, enriches cross-references.
-
-The default mode keeps the lab fully offline. The agentic mode shines
-when you need quality classification or normalization of heterogeneous
-sources — at the cost of LLM calls per item.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -32,6 +30,7 @@ from mnemo.core.protocols import RagPipeline
 from mnemo.factory import build_system
 from mnemo.ingestion.bugs_loader import load_bugs
 from mnemo.ingestion.specs_loader import load_specs
+from mnemo.registry import ENVIRONMENTS, validate_environment, validate_slug
 
 logger = logging.getLogger("mnemo")
 
@@ -98,18 +97,38 @@ def _ingest(pipeline: RagPipeline, documents: Sequence[Document], label: str) ->
     return 0
 
 
+def _apply_overrides(args: argparse.Namespace) -> None:
+    """Inject CLI overrides into the environment so Settings picks them up."""
+    if getattr(args, "project", None):
+        os.environ["MNEMO_PROJECT"] = args.project
+    if getattr(args, "environment", None):
+        os.environ["MNEMO_ENVIRONMENT"] = args.environment
+
+
 def _cmd_specs(args: argparse.Namespace) -> int:
+    _apply_overrides(args)
     settings = load_settings()
     source: Path = args.path or settings.specs_source_dir
-    system = build_system(settings)
+    system = build_system(settings, auto_register=True)
+    logger.info(
+        "Target: project=%s (id=%s) env=%s collection=%s",
+        settings.project, system.project_id, system.environment,
+        f"{system.effective_prefix}_{settings.specs_collection}",
+    )
     docs = _load_specs(source, getattr(args, "agentic", None))
     return _ingest(system.specs, docs, "specs")
 
 
 def _cmd_bugs(args: argparse.Namespace) -> int:
+    _apply_overrides(args)
     settings = load_settings()
     source: Path = args.path or settings.bugs_source_dir
-    system = build_system(settings)
+    system = build_system(settings, auto_register=True)
+    logger.info(
+        "Target: project=%s (id=%s) env=%s collection=%s",
+        settings.project, system.project_id, system.environment,
+        f"{system.effective_prefix}_{settings.bugs_collection}",
+    )
     docs = _load_bugs(source, getattr(args, "agentic", None))
     return _ingest(system.bugs, docs, "bugs")
 
@@ -133,15 +152,43 @@ def _add_common_flags(parser: argparse.ArgumentParser, *, hide_path: bool = Fals
         help=argparse.SUPPRESS if hide_path else "Override the source dir for this run.",
     )
     parser.add_argument(
+        "--project",
+        type=_slug,
+        default=None,
+        help="Project slug (lowercase, [a-z0-9-], max 32 chars). Default: from env/.env "
+             "(or 'demo-project').",
+    )
+    parser.add_argument(
+        "--env",
+        dest="environment",
+        choices=list(ENVIRONMENTS),
+        default=None,
+        help="Environment for this project. Default: from env/.env (or 'dev').",
+    )
+    parser.add_argument(
         "--agentic",
         choices=["copilot"],
         default=None,
         help=(
             "Use an LLM-powered ingestion agent instead of the deterministic "
-            "loader. Requires the chosen runtime to be installed (e.g. the "
-            "GitHub Copilot CLI for 'copilot'). Default: deterministic."
+            "loader. Default: deterministic."
         ),
     )
+
+
+def _slug(value: str) -> str:
+    """argparse type: validate slug, raise ArgumentTypeError on failure."""
+    try:
+        return validate_slug(value)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _env(value: str) -> str:
+    try:
+        return validate_environment(value)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:

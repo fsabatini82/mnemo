@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -37,8 +38,14 @@ def patched_system(
     specs_pipeline = _RecordingPipeline()
     bugs_pipeline = _RecordingPipeline()
 
-    def fake_build(settings: Any) -> MnemoSystem:
-        return MnemoSystem(specs=specs_pipeline, bugs=bugs_pipeline, settings=settings)
+    def fake_build(settings: Any, **kwargs: Any) -> MnemoSystem:
+        return MnemoSystem(
+            specs=specs_pipeline,
+            bugs=bugs_pipeline,
+            settings=settings,
+            project_id="999",
+            environment=settings.environment,
+        )
 
     monkeypatch.setattr("mnemo.cli.build_system", fake_build)
     # Default-arg paths read from Settings; point them at our fixtures.
@@ -111,3 +118,26 @@ def test_ingest_helper_returns_zero_when_documents_present() -> None:
 def test_main_requires_subcommand() -> None:
     with pytest.raises(SystemExit):
         cli.main([])
+
+
+# ---------------------------------------------------------------------------
+# Project/env flags
+# ---------------------------------------------------------------------------
+
+
+def test_specs_flag_project_propagates_to_env(patched_system) -> None:
+    """--project / --env are applied to os.environ before Settings load."""
+    rc = cli.main(["specs", "--project", "alpha", "--env", "prd"])
+    assert rc == 0
+    assert os.environ.get("MNEMO_PROJECT") == "alpha"
+    assert os.environ.get("MNEMO_ENVIRONMENT") == "prd"
+
+
+def test_specs_rejects_invalid_project_slug() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["specs", "--project", "Alpha"])  # uppercase = invalid
+
+
+def test_specs_rejects_invalid_environment() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["specs", "--env", "uat"])  # not in enum

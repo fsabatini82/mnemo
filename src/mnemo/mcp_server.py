@@ -4,28 +4,38 @@ Two knowledge axes:
   • specs       — what to build (user stories, ADRs, epics)
   • bug_memory  — what went wrong before (resolved bugs with root causes)
 
-Tools are intentionally narrow and composable so an agent can chain them
-during multi-step reasoning (e.g. fetch a spec → look for related bugs →
-generate code).
+Project + environment isolation: a single `mnemo-server` instance is
+scoped to one `(project, environment)` pair via CLI flags or env vars,
+so an IDE workspace can register `mnemo-server --project alpha --env prd`
+and an entirely separate workspace can register the same binary with
+different flags pointing at different storage.
+
+Tools are intentionally narrow and composable so an agent can chain
+them during multi-step reasoning.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mnemo.config import load_settings
+from mnemo.config import Settings, load_settings
 from mnemo.factory import MnemoSystem, build_system
+from mnemo.registry import ENVIRONMENTS
 
 logger = logging.getLogger(__name__)
 
-_settings = load_settings()
-_system: MnemoSystem = build_system(_settings)
-
 mcp = FastMCP("mnemo")
+
+# Lazy-initialized at main() to allow CLI flags to override env before
+# Settings are constructed. Tools assert these are populated.
+_settings: Settings | None = None
+_system: MnemoSystem | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -44,9 +54,12 @@ def query_specs(question: str, k: int | None = None) -> dict[str, Any]:
         question: Natural-language question or spec identifier to look up.
         k: Optional override for the number of chunks to return.
     """
-    result = _system.specs.query(question, k=k or _settings.top_k)
+    settings, system = _require_loaded()
+    result = system.specs.query(question, k=k or settings.top_k)
     return {
         "axis": "specs",
+        "project": settings.project,
+        "environment": settings.environment,
         "question": result.question,
         "hits": [_hit_to_dict(h) for h in result.hits],
     }
@@ -54,11 +67,7 @@ def query_specs(question: str, k: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_spec(spec_id: str) -> dict[str, Any]:
-    """Retrieve a spec by its identifier (e.g. "US-102", "ADR-002").
-
-    Equivalent to a focused query on the spec ID — useful when the agent
-    already knows which item it needs and wants the full content.
-    """
+    """Retrieve a spec by its identifier (e.g. "US-102", "ADR-002")."""
     return query_specs(spec_id, k=10)
 
 
@@ -71,17 +80,16 @@ def get_spec(spec_id: str) -> dict[str, Any]:
 def query_bugs(symptom: str, k: int | None = None) -> dict[str, Any]:
     """Semantic search across the resolved bug history.
 
-    Use this when debugging or before modifying a sensitive area: it
-    surfaces past bugs whose symptom or root cause resembles the input,
-    along with the fix that worked.
-
     Args:
         symptom: Description of the issue, error message, or area of concern.
         k: Optional override for the number of bugs to return.
     """
-    result = _system.bugs.query(symptom, k=k or _settings.top_k)
+    settings, system = _require_loaded()
+    result = system.bugs.query(symptom, k=k or settings.top_k)
     return {
         "axis": "bug_memory",
+        "project": settings.project,
+        "environment": settings.environment,
         "question": result.question,
         "hits": [_hit_to_dict(h) for h in result.hits],
     }
@@ -89,12 +97,7 @@ def query_bugs(symptom: str, k: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_bug(bug_id: str) -> dict[str, Any]:
-    """Retrieve a bug by its identifier (e.g. "BUG-503").
-
-    Returns the full record with symptom, root cause, fix summary, files
-    touched, and pattern tags — everything an agent needs to apply the
-    same fix shape to a similar new problem.
-    """
+    """Retrieve a bug by its identifier (e.g. "BUG-503")."""
     return query_bugs(bug_id, k=3)
 
 
@@ -106,23 +109,28 @@ def get_bug(bug_id: str) -> dict[str, Any]:
 @mcp.tool()
 def mnemo_info() -> dict[str, Any]:
     """Return the active configuration — useful for sanity checks in demos."""
+    settings, system = _require_loaded()
     return {
-        "store": _settings.store,
-        "pipeline": _settings.pipeline,
-        "embed_model": _settings.embed_model,
+        "project": settings.project,
+        "project_id": system.project_id,
+        "environment": settings.environment,
+        "effective_prefix": system.effective_prefix,
+        "store": settings.store,
+        "pipeline": settings.pipeline,
+        "embed_model": settings.embed_model,
         "collections": {
-            "specs": _settings.specs_collection,
-            "bugs": _settings.bugs_collection,
+            "specs": f"{system.effective_prefix}_{settings.specs_collection}",
+            "bugs": f"{system.effective_prefix}_{settings.bugs_collection}",
         },
         "sources": {
-            "specs_dir": str(_settings.specs_source_dir),
-            "bugs_dir": str(_settings.bugs_source_dir),
+            "specs_dir": str(settings.specs_source_dir),
+            "bugs_dir": str(settings.bugs_source_dir),
         },
         "chunking": {
-            "size": _settings.chunk_size,
-            "overlap": _settings.chunk_overlap,
+            "size": settings.chunk_size,
+            "overlap": settings.chunk_overlap,
         },
-        "top_k": _settings.top_k,
+        "top_k": settings.top_k,
     }
 
 
@@ -141,6 +149,19 @@ def _hit_to_dict(h: Any) -> dict[str, Any]:
     }
 
 
+def _require_loaded() -> tuple[Settings, MnemoSystem]:
+    if _settings is None or _system is None:
+        raise RuntimeError(
+            "mnemo-server tools were called before main() initialized the system."
+        )
+    return _settings, _system
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
 _TTY_USAGE_HINT = """\
 mnemo-server is an MCP stdio server.
 
@@ -150,6 +171,7 @@ interactive terminal — stdin must carry JSON-RPC messages.
 
 To verify the install instead, run:
   mnemo-ingest --help        (real CLI with --help support)
+  mnemo-admin list-projects  (registry inspection)
   where mnemo-server         (Windows: print the executable path)
   which mnemo-server         (Linux/macOS: print the executable path)
 
@@ -158,19 +180,56 @@ manually (e.g. to debug a client).
 """
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mnemo-server",
+        description="MCP stdio server exposing the Mnemo organizational memory.",
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Override MNEMO_PROJECT for this server instance.",
+    )
+    parser.add_argument(
+        "--env",
+        dest="environment",
+        choices=list(ENVIRONMENTS),
+        default=None,
+        help="Override MNEMO_ENVIRONMENT for this server instance.",
+    )
+    parser.add_argument(
+        "--force-stdio",
+        action="store_true",
+        help="Bypass the TTY-guard and run the stdio loop unconditionally.",
+    )
+    return parser
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Friendly guard: if invoked interactively (stdin attached to a TTY)
-    # the user almost certainly didn't mean to launch the stdio loop.
-    # Print a hint and exit cleanly instead of crashing on the first
-    # non-JSON-RPC bytes the terminal sends.
-    force = "--force-stdio" in sys.argv[1:]
-    if sys.stdin.isatty() and not force:
+    args = _build_parser().parse_args()
+
+    if args.project:
+        os.environ["MNEMO_PROJECT"] = args.project
+    if args.environment:
+        os.environ["MNEMO_ENVIRONMENT"] = args.environment
+
+    # Friendly guard against interactive launch (stdin = TTY).
+    if sys.stdin.isatty() and not args.force_stdio:
         sys.stderr.write(_TTY_USAGE_HINT)
         sys.exit(0)
+
+    global _settings, _system
+    _settings = load_settings()
+    _system = build_system(_settings)  # read-only: auto_register=False
+    logger.info(
+        "Mnemo server scope: project=%s (id=%s) env=%s",
+        _settings.project, _system.project_id, _settings.environment,
+    )
+
     mcp.run()
 
 

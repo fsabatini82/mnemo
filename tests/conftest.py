@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -10,6 +11,19 @@ import pytest
 
 from mnemo.config import Settings
 from mnemo.core.models import Chunk, Document
+
+
+# ---------------------------------------------------------------------------
+# Test isolation — neutralize the user's MNEMO_* env vars so tests don't
+# inherit ambient config from the shell.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mnemo_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("MNEMO_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 # ---------------------------------------------------------------------------

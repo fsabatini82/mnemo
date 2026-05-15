@@ -1,20 +1,25 @@
 """Typed runtime configuration for Mnemo.
 
 Two knowledge collections coexist in the same RAG store: `specs` and
-`bug_memory`. Source paths are configurable so the audience can point
-them at the asset folders extracted from the lab repo.
+`bug_memory`. Each is namespaced under a `(project, environment)` pair
+so a single Mnemo install can serve multiple projects and lifecycle
+stages (dev, col, pre, prd) without cross-contamination.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 StoreName = Literal["chroma", "lance"]
 PipelineName = Literal["default", "llamaindex"]
+EnvironmentName = Literal["dev", "col", "pre", "prd"]
+
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 
 class Settings(BaseSettings):
@@ -28,11 +33,20 @@ class Settings(BaseSettings):
     # Persistence
     persist_dir: Path = Path("./data")
 
-    # Collection names — one per knowledge axis
+    # --- Multi-tenant namespace ---------------------------------------------
+    # `project` is the human-facing slug; the registry maps it to a stable
+    # 3-digit ID used in the underlying collection names. `environment`
+    # is the lifecycle stage (dev/col/pre/prd) — collections are scoped
+    # by (project_id, environment) so the same project can keep separate
+    # corpora per environment.
+    project: str = "demo-project"
+    environment: EnvironmentName = "dev"
+
+    # Collection axes — these are the suffixes of the final collection names.
     specs_collection: str = "specs"
     bugs_collection: str = "bug_memory"
 
-    # External source paths (the agentic CLIs read from these)
+    # External source paths (the ingestion CLIs read from these)
     specs_source_dir: Path = Path("./assets/specs-source")
     bugs_source_dir: Path = Path("./assets/bugs-source")
 
@@ -49,6 +63,27 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # ------------------------------------------------------------------ validators
+
+    @field_validator("project")
+    @classmethod
+    def _validate_project_slug(cls, v: str) -> str:
+        if not _SLUG_RE.fullmatch(v):
+            raise ValueError(
+                f"Invalid project slug {v!r}: must be lowercase, start with a "
+                "letter, max 32 chars, and contain only [a-z0-9-]."
+            )
+        return v
+
+    @field_validator("specs_collection", "bugs_collection")
+    @classmethod
+    def _validate_axis(cls, v: str) -> str:
+        if not re.fullmatch(r"[a-z_]+", v):
+            raise ValueError(
+                f"Collection axis {v!r} must be lowercase letters/underscore only."
+            )
+        return v
 
 
 def load_settings() -> Settings:

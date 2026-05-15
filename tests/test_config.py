@@ -68,3 +68,54 @@ def test_load_settings_returns_instance(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.chdir(tmp_path)
     settings = load_settings()
     assert isinstance(settings, Settings)
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenant fields (project, environment)
+# ---------------------------------------------------------------------------
+
+
+def test_defaults_project_and_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings()
+    assert settings.project == "demo-project"
+    assert settings.environment == "dev"
+
+
+@pytest.mark.parametrize("bad", ["Alpha", "1alpha", "alpha_beta", "alpha.beta", ""])
+def test_invalid_project_slug_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MNEMO_PROJECT", bad)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("bad", ["development", "DEV", "uat", "test"])
+def test_invalid_environment_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MNEMO_ENVIRONMENT", bad)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("env", ["dev", "col", "pre", "prd"])
+def test_environment_enum_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, env: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MNEMO_ENVIRONMENT", env)
+    settings = Settings()
+    assert settings.environment == env
+
+
+def test_invalid_collection_axis_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MNEMO_SPECS_COLLECTION", "Bad-Name")
+    with pytest.raises(ValidationError):
+        Settings()
