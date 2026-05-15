@@ -24,6 +24,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemo.audit import AuditEngine
 from mnemo.config import Settings, load_settings
 from mnemo.factory import MnemoSystem, build_system
 from mnemo.lifecycle import assert_canonical as _assert_canonical_lifecycle
@@ -117,6 +118,45 @@ def get_bug(bug_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def audit_spec(spec_id: str) -> dict[str, Any]:
+    """Run the cheap drift checks against a single spec.
+
+    Returns a structured report with `severity` (none/low/medium/high)
+    and a list of `issues`, each tagged by type (status / coverage_over
+    / coverage_under / template). Use this before modifying a sensitive
+    area to spot AS-IS / TO-BE divergence.
+    """
+    settings, system = _require_loaded()
+    engine = AuditEngine(system.specs, code_root=settings.code_root)
+    report = engine.audit_spec(spec_id)
+    if report is None:
+        return {
+            "spec_id": spec_id,
+            "error": f"Spec {spec_id!r} not found in the active project's specs collection.",
+        }
+    return report.to_dict()
+
+
+@mcp.tool()
+def audit_implemented_specs() -> dict[str, Any]:
+    """Run cheap drift checks across every `lifecycle=implemented` spec.
+
+    Returns a summary plus per-spec reports. Useful for periodic
+    "what's drifted lately?" sweeps during refactoring or code review.
+    """
+    settings, system = _require_loaded()
+    engine = AuditEngine(system.specs, code_root=settings.code_root)
+    reports = engine.audit_all(lifecycle="implemented")
+    return {
+        "project": settings.project,
+        "environment": settings.environment,
+        "total_audited": len(reports),
+        "with_drift": sum(1 for r in reports if r.has_drift),
+        "reports": [r.to_dict() for r in reports],
+    }
 
 
 @mcp.tool()

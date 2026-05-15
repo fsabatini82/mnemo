@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # Retrieval
     top_k: int = Field(default=5, gt=0)
 
+    # Code root for drift detection — defaults to the CWD when not set.
+    # The audit engine resolves `related_files` paths against this root.
+    code_root: Path = Path(".")
+
     model_config = SettingsConfigDict(
         env_prefix="MNEMO_",
         env_file=".env",

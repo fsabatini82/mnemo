@@ -59,6 +59,7 @@ dev = [
 mnemo-server = "mnemo.mcp_server:main"
 mnemo-ingest = "mnemo.cli:main"
 mnemo-admin = "mnemo.admin_cli:main"
+mnemo-audit = "mnemo.audit_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/fsabatini82/mnemo"
