@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
+import datetime as _dt
+
 from mnemo.ingestion.specs_loader import (
+    _flatten_metadata,
     _infer_kind,
     _render_indexed_text,
     _split_frontmatter,
@@ -104,6 +107,40 @@ def test_render_indexed_text_minimal() -> None:
     assert rendered == "just body"
 
 
+def test_flatten_metadata_handles_dates() -> None:
+    # YAML auto-converts `2025-06-14` into datetime.date; Chroma 1.x rejects it.
+    flat = _flatten_metadata({"date": _dt.date(2025, 6, 14)})
+    assert flat == {"date": "2025-06-14"}
+
+
+def test_flatten_metadata_joins_lists() -> None:
+    flat = _flatten_metadata({"related_bugs": ["BUG-1", "BUG-2"]})
+    assert flat == {"related_bugs": "BUG-1, BUG-2"}
+
+
+def test_flatten_metadata_preserves_scalars() -> None:
+    src = {"a": "x", "b": 1, "c": 1.5, "d": True, "e": None}
+    assert _flatten_metadata(src) == src
+
+
+def test_flatten_metadata_stringifies_dicts() -> None:
+    flat = _flatten_metadata({"obj": {"k": "v"}})
+    assert flat["obj"] == "{'k': 'v'}"
+
+
+def test_parse_spec_flattens_yaml_date_field(tmp_path: Path) -> None:
+    """Regression for the production failure on ADR-002 (YAML `date:` field)."""
+    p = tmp_path / "adrs" / "ADR-X.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: ADR-X\ntitle: Test\ndate: 2025-06-14\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    assert isinstance(doc.metadata["date"], str)
+    assert doc.metadata["date"] == "2025-06-14"
+
+
 def test_load_specs_returns_all_documents(specs_dir: Path) -> None:
     docs = load_specs(specs_dir)
     assert len(docs) == 4
@@ -111,3 +148,39 @@ def test_load_specs_returns_all_documents(specs_dir: Path) -> None:
     assert "US-001" in ids
     assert "EPIC-BE" in ids
     assert "ADR-001" in ids
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle field (F2)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_spec_normalizes_canonical_lifecycle(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-L1.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: US-L1\ntitle: T\nlifecycle: IN_PROGRESS\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["lifecycle"] == "in-progress"
+
+
+def test_parse_spec_lifecycle_absent_returns_empty(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-L2.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("---\nid: US-L2\ntitle: T\n---\n\nBody.\n", encoding="utf-8")
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["lifecycle"] == ""
+
+
+def test_parse_spec_lifecycle_non_canonical_stored_as_is(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-L3.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: US-L3\ntitle: T\nlifecycle: draft\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    # Non-canonical values are still stored — they just won't match strict filters.
+    assert doc.metadata["lifecycle"] == "draft"

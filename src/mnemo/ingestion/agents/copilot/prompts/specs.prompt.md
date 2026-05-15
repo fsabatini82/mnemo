@@ -16,6 +16,7 @@ markdown fences. Use this schema:
   "id": "US-102",
   "title": "Listare task del progetto con filtri opzionali",
   "kind": "story",
+  "lifecycle": "implemented",
   "epic": "EPIC-BE",
   "status": "ready",
   "related_bugs": ["BUG-502"],
@@ -36,6 +37,11 @@ Field semantics:
   has YAML frontmatter, take it from there. Otherwise infer from the
   filename or content. If nothing reasonable, return `null`.
 - `kind` — one of `story` | `adr` | `epic` | `bdd` | `spec` (generic).
+- `lifecycle` — one of `proposed` | `in-progress` | `implemented` | `superseded` | `as-is`.
+  Infer from frontmatter when present; otherwise pick the value that best
+  fits the document's content (e.g. ADRs that describe a shipped decision
+  are `implemented`; documents proposing new behavior are `proposed`).
+  If you cannot decide confidently, return `"proposed"` (the safest default).
 - `epic`, `status` — from frontmatter if present, otherwise `null`.
 - `related_bugs`, `related_adrs`, `related_files` — arrays of strings.
   Pull from frontmatter when available; also scan the body text for

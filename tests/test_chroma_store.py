@@ -90,3 +90,45 @@ def test_store_persists_across_instances(tmp_path: Path) -> None:
     hits = s2.search(_vec(0.3), k=1)
     assert len(hits) == 1
     assert hits[0].text == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Metadata where-filter (F2)
+# ---------------------------------------------------------------------------
+
+
+def test_search_with_where_filters_by_metadata(store: ChromaStore) -> None:
+    """Push-down `where` filter must respect metadata equality."""
+    chunks = [
+        Chunk(id="c-impl", doc_id="d-1", text="implemented body",
+              metadata={"lifecycle": "implemented"}),
+        Chunk(id="c-prop", doc_id="d-2", text="proposed body",
+              metadata={"lifecycle": "proposed"}),
+        Chunk(id="c-asis", doc_id="d-3", text="as-is body",
+              metadata={"lifecycle": "as-is"}),
+    ]
+    store.upsert(chunks, [_vec(0.1), _vec(0.2), _vec(0.3)])
+
+    hits = store.search(_vec(0.1), k=5, where={"lifecycle": "implemented"})
+    assert {h.chunk_id for h in hits} == {"c-impl"}
+
+    hits = store.search(_vec(0.1), k=5, where={"lifecycle": "superseded"})
+    assert hits == []
+
+    hits = store.search(_vec(0.1), k=5)
+    assert {h.chunk_id for h in hits} == {"c-impl", "c-prop", "c-asis"}
+
+
+def test_search_with_where_in_operator(store: ChromaStore) -> None:
+    chunks = [
+        Chunk(id="c-impl", doc_id="d-1", text="t1", metadata={"lifecycle": "implemented"}),
+        Chunk(id="c-prop", doc_id="d-2", text="t2", metadata={"lifecycle": "proposed"}),
+        Chunk(id="c-asis", doc_id="d-3", text="t3", metadata={"lifecycle": "as-is"}),
+    ]
+    store.upsert(chunks, [_vec(0.1), _vec(0.2), _vec(0.3)])
+
+    hits = store.search(
+        _vec(0.1), k=5,
+        where={"lifecycle": {"$in": ["implemented", "proposed"]}},
+    )
+    assert {h.chunk_id for h in hits} == {"c-impl", "c-prop"}

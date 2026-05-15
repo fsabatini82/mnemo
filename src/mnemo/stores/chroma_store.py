@@ -5,8 +5,9 @@ Satisfies `VectorStore` Protocol. Cosine similarity, telemetry disabled.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -42,12 +43,23 @@ class ChromaStore:
             metadatas=[{"doc_id": c.doc_id, **c.metadata} for c in chunks],
         )
 
-    def search(self, embedding: Sequence[float], *, k: int = 5) -> list[Hit]:
-        result = self._collection.query(
-            query_embeddings=[list(embedding)],
-            n_results=k,
-            include=["documents", "metadatas", "distances"],
-        )
+    def search(
+        self,
+        embedding: Sequence[float],
+        *,
+        k: int = 5,
+        where: Mapping[str, Any] | None = None,
+    ) -> list[Hit]:
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [list(embedding)],
+            "n_results": k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where:
+            # Chroma accepts equality filters as `where={"key": "value"}`
+            # and supports operators like `{"$in": [...]}` natively.
+            query_kwargs["where"] = dict(where)
+        result = self._collection.query(**query_kwargs)
         ids = result["ids"][0]
         docs = result["documents"][0]
         metas = result["metadatas"][0]

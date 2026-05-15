@@ -7,8 +7,9 @@ when you outgrow the hand-rolled pipeline" alternative.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import chromadb
 from llama_index.core import StorageContext, VectorStoreIndex
@@ -51,8 +52,18 @@ class LlamaIndexPipeline:
         nodes = self._parser.get_nodes_from_documents(li_docs)
         self._index.insert_nodes(nodes)
 
-    def query(self, question: str, *, k: int = 5) -> QueryResult:
-        retriever = self._index.as_retriever(similarity_top_k=k)
+    def query(
+        self,
+        question: str,
+        *,
+        k: int = 5,
+        where: Mapping[str, Any] | None = None,
+    ) -> QueryResult:
+        # Over-fetch and apply equality filter client-side; LlamaIndex's
+        # MetadataFilters API differs across versions, so we keep this
+        # simple and consistent with the lab's small corpora.
+        fetch_k = k if where is None else max(k * 4, 20)
+        retriever = self._index.as_retriever(similarity_top_k=fetch_k)
         results = retriever.retrieve(question)
         hits = [
             Hit(
@@ -64,4 +75,9 @@ class LlamaIndexPipeline:
             )
             for r in results
         ]
+        if where:
+            from mnemo.core.protocols import matches_where
+
+            hits = [h for h in hits if matches_where(h.metadata, where)]
+        hits = hits[:k]
         return QueryResult(question=question, hits=hits)

@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from mnemo.core.models import Document
+from mnemo.lifecycle import normalize as normalize_lifecycle
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
@@ -44,6 +45,8 @@ def parse_spec(path: Path, root: Path) -> Document:
 
     metadata.setdefault("source_file", str(path.relative_to(root)))
     metadata.setdefault("kind", _infer_kind(path, root))
+    # Lifecycle: normalized to the canonical vocabulary; empty when absent.
+    metadata["lifecycle"] = normalize_lifecycle(metadata.get("lifecycle"))
 
     # The doc id favors the frontmatter `id` (e.g. "US-102") and falls
     # back to the relative path. Stable IDs let re-ingest behave as upsert.

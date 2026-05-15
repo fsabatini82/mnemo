@@ -18,8 +18,9 @@ class _RecordingStore:
     def upsert(self, chunks: Sequence[Chunk], embeddings: Sequence[Sequence[float]]) -> None:
         self.upserts.append((list(chunks), list(embeddings)))
 
-    def search(self, embedding: Sequence[float], *, k: int = 5) -> list[Hit]:
+    def search(self, embedding: Sequence[float], *, k: int = 5, where: dict | None = None) -> list[Hit]:
         self.searches.append((list(embedding), k))
+        self.last_where = dict(where) if where else None
         return [Hit(chunk_id="c1", doc_id="d1", text="match", score=0.9)]
 
 
@@ -31,9 +32,11 @@ class _HybridStore(_RecordingStore):
         self.hybrid_calls: list[tuple[Sequence[float], str, int]] = []
 
     def hybrid_search(
-        self, embedding: Sequence[float], query_text: str, *, k: int = 5
+        self, embedding: Sequence[float], query_text: str, *,
+        k: int = 5, where: dict | None = None,
     ) -> list[Hit]:
         self.hybrid_calls.append((list(embedding), query_text, k))
+        self.last_where = dict(where) if where else None
         return [Hit(chunk_id="h1", doc_id="d1", text="hybrid", score=0.95)]
 
 
@@ -108,3 +111,35 @@ def test_query_uses_hybrid_search_when_store_supports_it(fake_embedder) -> None:
     assert query_text == "What is X?"
     assert k == 4
     assert result.hits[0].text == "hybrid"
+
+
+# ---------------------------------------------------------------------------
+# `where` filter forwarding (F2)
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_forwards_where_to_plain_store(fake_embedder) -> None:
+    store = _RecordingStore()
+    pipeline = DefaultPipeline(
+        embedder=fake_embedder, store=store, chunk_size=64, chunk_overlap=8,
+    )
+    pipeline.query("q", where={"lifecycle": "implemented"})
+    assert store.last_where == {"lifecycle": "implemented"}
+
+
+def test_pipeline_forwards_where_to_hybrid_store(fake_embedder) -> None:
+    store = _HybridStore()
+    pipeline = DefaultPipeline(
+        embedder=fake_embedder, store=store, chunk_size=64, chunk_overlap=8,
+    )
+    pipeline.query("q", where={"kind": "story"})
+    assert store.last_where == {"kind": "story"}
+
+
+def test_pipeline_no_where_kwarg_means_none(fake_embedder) -> None:
+    store = _RecordingStore()
+    pipeline = DefaultPipeline(
+        embedder=fake_embedder, store=store, chunk_size=64, chunk_overlap=8,
+    )
+    pipeline.query("q")
+    assert store.last_where is None

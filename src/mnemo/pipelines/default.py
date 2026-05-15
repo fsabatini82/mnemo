@@ -6,7 +6,8 @@ into the standard ingest/query flow, without any framework magic.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from mnemo.chunking import chunk_documents
 from mnemo.core.models import Document, QueryResult
@@ -38,10 +39,16 @@ class DefaultPipeline:
         embeddings = self._embedder.embed([c.text for c in chunks])
         self._store.upsert(chunks, embeddings)
 
-    def query(self, question: str, *, k: int = 5) -> QueryResult:
+    def query(
+        self,
+        question: str,
+        *,
+        k: int = 5,
+        where: Mapping[str, Any] | None = None,
+    ) -> QueryResult:
         embedding = self._embedder.embed([question])[0]
         if isinstance(self._store, SupportsHybridSearch):
-            hits = self._store.hybrid_search(embedding, question, k=k)
+            hits = self._store.hybrid_search(embedding, question, k=k, where=where)
         else:
-            hits = self._store.search(embedding, k=k)
+            hits = self._store.search(embedding, k=k, where=where)
         return QueryResult(question=question, hits=hits)

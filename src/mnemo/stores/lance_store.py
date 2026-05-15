@@ -8,7 +8,7 @@ automatically when the store advertises it.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ import pyarrow as pa
 from lancedb.rerankers import RRFReranker
 
 from mnemo.core.models import Chunk, Hit
+from mnemo.core.protocols import matches_where as _matches_where
 
 
 class LanceStore:
@@ -76,9 +77,25 @@ class LanceStore:
         except Exception:
             pass
 
-    def search(self, embedding: Sequence[float], *, k: int = 5) -> list[Hit]:
-        rows = self._table.search(list(embedding)).limit(k).to_list()
-        return self._to_hits(rows, score_key="_distance", invert_distance=True)
+    def search(
+        self,
+        embedding: Sequence[float],
+        *,
+        k: int = 5,
+        where: Mapping[str, Any] | None = None,
+    ) -> list[Hit]:
+        # Lance stores metadata as a JSON-encoded text column, so we
+        # can't push arbitrary `key=value` filters into the SQL WHERE
+        # without column-promoting each filterable field. We over-fetch
+        # and filter client-side. For lab-scale corpora this is fine;
+        # for very large stores, promote the relevant metadata field
+        # to a top-level Lance column.
+        fetch_k = k if where is None else max(k * 4, 20)
+        rows = self._table.search(list(embedding)).limit(fetch_k).to_list()
+        hits = self._to_hits(rows, score_key="_distance", invert_distance=True)
+        if where:
+            hits = [h for h in hits if _matches_where(h.metadata, where)]
+        return hits[:k]
 
     def hybrid_search(
         self,
@@ -86,16 +103,21 @@ class LanceStore:
         query_text: str,
         *,
         k: int = 5,
+        where: Mapping[str, Any] | None = None,
     ) -> list[Hit]:
+        fetch_k = k if where is None else max(k * 4, 20)
         rows = (
             self._table.search(query_type="hybrid")
             .vector(list(embedding))
             .text(query_text)
             .rerank(reranker=self._reranker)
-            .limit(k)
+            .limit(fetch_k)
             .to_list()
         )
-        return self._to_hits(rows, score_key="_relevance_score", invert_distance=False)
+        hits = self._to_hits(rows, score_key="_relevance_score", invert_distance=False)
+        if where:
+            hits = [h for h in hits if _matches_where(h.metadata, where)]
+        return hits[:k]
 
     @staticmethod
     def _to_hits(
@@ -118,3 +140,5 @@ class LanceStore:
                 )
             )
         return hits
+
+

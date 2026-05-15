@@ -17,6 +17,7 @@ from typing import Any
 
 from mnemo.core.models import Document
 from mnemo.ingestion.agents.copilot.runner import CopilotRunner, CopilotRunnerError
+from mnemo.lifecycle import normalize as normalize_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class CopilotSpecsAgent:
         metadata: dict[str, Any] = {
             "source_file": rel,
             "kind": str(record.get("kind") or "spec"),
+            "lifecycle": normalize_lifecycle(record.get("lifecycle")),
             "title": record.get("title") or "",
             "epic": record.get("epic") or "",
             "status": record.get("status") or "",

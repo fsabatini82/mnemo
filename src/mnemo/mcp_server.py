@@ -26,6 +26,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mnemo.config import Settings, load_settings
 from mnemo.factory import MnemoSystem, build_system
+from mnemo.lifecycle import assert_canonical as _assert_canonical_lifecycle
 from mnemo.registry import ENVIRONMENTS
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,11 @@ _system: MnemoSystem | None = None
 
 
 @mcp.tool()
-def query_specs(question: str, k: int | None = None) -> dict[str, Any]:
+def query_specs(
+    question: str,
+    k: int | None = None,
+    lifecycle: str | None = None,
+) -> dict[str, Any]:
     """Semantic search across the project specs (user stories, ADRs, epics).
 
     Use this when implementing a feature: it surfaces the acceptance
@@ -53,13 +58,21 @@ def query_specs(question: str, k: int | None = None) -> dict[str, Any]:
     Args:
         question: Natural-language question or spec identifier to look up.
         k: Optional override for the number of chunks to return.
+        lifecycle: Optional filter — restrict results to specs whose
+            `lifecycle` metadata equals this value. Must be one of
+            `proposed`, `in-progress`, `implemented`, `superseded`, `as-is`.
     """
     settings, system = _require_loaded()
-    result = system.specs.query(question, k=k or settings.top_k)
+    where = None
+    if lifecycle is not None:
+        _assert_canonical_lifecycle(lifecycle)
+        where = {"lifecycle": lifecycle}
+    result = system.specs.query(question, k=k or settings.top_k, where=where)
     return {
         "axis": "specs",
         "project": settings.project,
         "environment": settings.environment,
+        "lifecycle_filter": lifecycle,
         "question": result.question,
         "hits": [_hit_to_dict(h) for h in result.hits],
     }
