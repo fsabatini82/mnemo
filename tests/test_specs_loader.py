@@ -184,3 +184,115 @@ def test_parse_spec_lifecycle_non_canonical_stored_as_is(tmp_path: Path) -> None
     doc = parse_spec(p, tmp_path)
     # Non-canonical values are still stored — they just won't match strict filters.
     assert doc.metadata["lifecycle"] == "draft"
+
+
+# ---------------------------------------------------------------------------
+# Template sections + compliance (F3)
+# ---------------------------------------------------------------------------
+
+
+_FULL_STORY = """---
+id: US-T1
+title: Full template story
+kind: story
+lifecycle: proposed
+---
+
+# US-T1 — Full template story
+
+## User Story
+Come dev voglio testare così da validare.
+
+## Acceptance Criteria
+- AC1: passa il test
+- AC2: niente regressioni
+
+## Test Scenarios
+
+### Happy path
+```gherkin
+Given setup
+When azione
+Then ok
+```
+
+### Error path
+```gherkin
+Given setup
+When errore
+Then 500
+```
+
+### Edge case
+```gherkin
+Given limite
+When azione
+Then comportamento boundary
+```
+
+## Acceptance Summary
+
+Story con tutte le sezioni canoniche, deve essere classificata full.
+"""
+
+
+def test_parse_spec_extracts_all_story_sections(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-T1.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(_FULL_STORY, encoding="utf-8")
+    doc = parse_spec(p, tmp_path)
+    assert "voglio testare" in doc.metadata["user_story"]
+    assert "AC1" in doc.metadata["acceptance_criteria"]
+    assert "Given setup" in doc.metadata["test_scenarios_happy"]
+    assert "500" in doc.metadata["test_scenarios_error"]
+    assert "limite" in doc.metadata["test_scenarios_edge"]
+    assert "tutte le sezioni" in doc.metadata["acceptance_summary"]
+    assert doc.metadata["template_compliance"] == "full"
+
+
+def test_parse_spec_missing_sections_classified_partial(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-T2.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: US-T2\ntitle: T\nkind: story\n---\n\n"
+        "# US-T2\n\n## Acceptance Criteria\n- only AC, nothing else\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["template_compliance"] == "partial"
+    assert doc.metadata["acceptance_criteria"]
+    assert doc.metadata["user_story"] == ""
+
+
+def test_parse_spec_no_sections_classified_non_compliant(tmp_path: Path) -> None:
+    p = tmp_path / "stories" / "US-T3.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: US-T3\ntitle: T\nkind: story\n---\n\n# US-T3\n\nJust prose.\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["template_compliance"] == "non-compliant"
+
+
+def test_parse_spec_unknown_kind_classified_na(tmp_path: Path) -> None:
+    p = tmp_path / "other" / "X.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("---\nid: X\nkind: glossary\n---\n\nBody\n", encoding="utf-8")
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["template_compliance"] == "n/a"
+
+
+def test_parse_spec_adr_full_compliance(tmp_path: Path) -> None:
+    p = tmp_path / "adrs" / "ADR-T.md"
+    p.parent.mkdir(parents=True)
+    p.write_text(
+        "---\nid: ADR-T\ntitle: T\nkind: adr\n---\n\n# ADR-T\n\n"
+        "## Context\nwhy\n\n## Decision\ndo X\n\n## Consequences\npro/contro\n",
+        encoding="utf-8",
+    )
+    doc = parse_spec(p, tmp_path)
+    assert doc.metadata["template_compliance"] == "full"
+    assert doc.metadata["context"] == "why"
+    assert doc.metadata["decision"] == "do X"
+    assert doc.metadata["consequences"] == "pro/contro"

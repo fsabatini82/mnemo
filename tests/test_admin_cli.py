@@ -115,3 +115,76 @@ def test_drop_unknown_project_returns_error(isolated_data: Path) -> None:
 def test_subcommand_required(isolated_data: Path) -> None:
     with pytest.raises(SystemExit):
         admin_cli.main([])
+
+
+# ---------------------------------------------------------------------------
+# new-spec subcommand (F3)
+# ---------------------------------------------------------------------------
+
+
+def test_new_spec_prints_to_stdout(
+    isolated_data: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    rc = admin_cli.main(["new-spec", "story", "--id", "US-200", "--title", "Login"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "US-200" in out
+    assert "Login" in out
+    assert "## User Story" in out
+    assert "## Test Scenarios" in out
+    assert "## Acceptance Summary" in out
+
+
+def test_new_spec_writes_to_file(
+    isolated_data: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    out_file = tmp_path / "specs" / "stories" / "US-201.md"
+    rc = admin_cli.main([
+        "new-spec", "story", "--id", "US-201", "--title", "SSO",
+        "-o", str(out_file),
+    ])
+    assert rc == 0
+    assert out_file.is_file()
+    content = out_file.read_text(encoding="utf-8")
+    assert "US-201" in content
+    assert "SSO" in content
+
+
+def test_new_spec_refuses_overwrite_without_force(
+    isolated_data: Path, tmp_path: Path,
+) -> None:
+    out_file = tmp_path / "x.md"
+    out_file.write_text("existing", encoding="utf-8")
+    rc = admin_cli.main([
+        "new-spec", "adr", "--id", "ADR-1", "--title", "T", "-o", str(out_file),
+    ])
+    assert rc == 2
+    assert out_file.read_text(encoding="utf-8") == "existing"  # untouched
+
+
+def test_new_spec_force_overwrites(
+    isolated_data: Path, tmp_path: Path,
+) -> None:
+    out_file = tmp_path / "x.md"
+    out_file.write_text("existing", encoding="utf-8")
+    rc = admin_cli.main([
+        "new-spec", "adr", "--id", "ADR-1", "--title", "T",
+        "-o", str(out_file), "--force",
+    ])
+    assert rc == 0
+    assert "ADR-1" in out_file.read_text(encoding="utf-8")
+
+
+def test_new_spec_rejects_unknown_kind(isolated_data: Path) -> None:
+    """argparse `choices` rejects this before reaching the handler."""
+    with pytest.raises(SystemExit):
+        admin_cli.main(["new-spec", "decision", "--id", "X", "--title", "T"])
+
+
+def test_new_spec_requires_id_and_title(isolated_data: Path) -> None:
+    with pytest.raises(SystemExit):
+        admin_cli.main(["new-spec", "story"])
+    with pytest.raises(SystemExit):
+        admin_cli.main(["new-spec", "story", "--id", "US-X"])
+    with pytest.raises(SystemExit):
+        admin_cli.main(["new-spec", "story", "--title", "T"])

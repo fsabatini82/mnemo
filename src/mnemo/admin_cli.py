@@ -1,10 +1,12 @@
-"""Mnemo admin CLI — manage the project registry.
+"""Mnemo admin CLI — manage the project registry and scaffold specs.
 
 Subcommands:
   list-projects           Show registered projects, their IDs and envs.
   rename-project          Rename a project slug (preserves underlying ID).
   drop-project            Remove a project (registry + collections).
   show-collection-names   Resolve and print the effective collection names.
+  new-spec                Scaffold a new spec from a canonical template
+                          (story | adr | epic).
 
 The registry lives at `<MNEMO_PERSIST_DIR>/projects.json`. Underlying
 collection drops happen in Chroma/LanceDB and are best-effort: if the
@@ -17,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 
 from mnemo.config import load_settings
@@ -29,6 +32,7 @@ from mnemo.registry import (
     validate_environment,
     validate_slug,
 )
+from mnemo.templates_io import TEMPLATE_KINDS, TemplateError, render as render_template
 
 logger = logging.getLogger("mnemo-admin")
 
@@ -115,6 +119,31 @@ def _cmd_drop(args: argparse.Namespace) -> int:
         print(f"WARNINGS — {len(failures)} drop(s) failed:")
         for name, reason in failures:
             print(f"  - {name}: {reason}")
+    return 0
+
+
+def _cmd_new_spec(args: argparse.Namespace) -> int:
+    """Render a template to file or stdout."""
+    try:
+        rendered = render_template(args.kind, id=args.id, title=args.title)
+    except TemplateError as exc:
+        logger.error(str(exc))
+        return 2
+
+    if args.output is None:
+        # Print to stdout for `>` redirection convenience.
+        print(rendered)
+        return 0
+
+    out_path = Path(args.output)
+    if out_path.exists() and not args.force:
+        logger.error(
+            "%s already exists. Pass --force to overwrite.", out_path
+        )
+        return 2
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(rendered, encoding="utf-8")
+    print(f"Wrote {args.kind} template → {out_path}")
     return 0
 
 
@@ -215,6 +244,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--env", dest="environment",
                         choices=list(ENVIRONMENTS), default=None)
     p_show.set_defaults(func=_cmd_show)
+
+    p_new = sub.add_parser(
+        "new-spec",
+        help="Scaffold a new spec from a canonical template (story|adr|epic).",
+    )
+    p_new.add_argument(
+        "kind", choices=list(TEMPLATE_KINDS),
+        help="Template kind to instantiate.",
+    )
+    p_new.add_argument("--id", required=True,
+                       help="Spec identifier, e.g. US-205 or ADR-007.")
+    p_new.add_argument("--title", required=True,
+                       help="One-line title to place in the heading.")
+    p_new.add_argument("-o", "--output", default=None,
+                       help="Write to this file path. If omitted, print to stdout.")
+    p_new.add_argument("--force", action="store_true",
+                       help="Overwrite the output file if it already exists.")
+    p_new.set_defaults(func=_cmd_new_spec)
 
     return parser
 

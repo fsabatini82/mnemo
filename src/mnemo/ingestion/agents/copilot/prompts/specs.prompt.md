@@ -22,7 +22,22 @@ markdown fences. Use this schema:
   "related_bugs": ["BUG-502"],
   "related_adrs": ["ADR-002"],
   "related_files": ["src/backend/routes/tasks.py"],
-  "body": "<full body of the spec, in markdown>"
+  "body": "<full body of the spec, in markdown>",
+
+  "user_story": "Come membro del progetto voglio listare i task...",
+  "acceptance_criteria": "- AC1: ...\n- AC2: ...",
+  "test_scenarios_happy": "Given ... When ... Then ...",
+  "test_scenarios_error": "Given ... When ... Then ...",
+  "test_scenarios_edge": "Given ... When ... Then ...",
+  "acceptance_summary": "Endpoint /api/v1/tasks ritorna lista filtrabile per status, assignee_id, label.",
+  "context": "",
+  "decision": "",
+  "consequences": "",
+  "goals": "",
+  "constraints": "",
+  "stories_in_scope": "",
+
+  "template_compliance": "full"
 }
 ```
 
@@ -48,6 +63,35 @@ Field semantics:
   references like "BUG-502" or "ADR-002" mentioned inline.
 - `body` — the full markdown body of the spec, without the frontmatter
   delimiters. Preserve formatting (headings, bullets, code blocks).
+
+**Template-aligned sections** (extract whichever apply to the `kind`):
+
+- `user_story`           — the "Come... voglio... così da..." paragraph (story only)
+- `acceptance_criteria`  — the AC bullet list, as a single string
+- `test_scenarios_happy` — the `### Happy path` gherkin block (story only)
+- `test_scenarios_error` — the `### Error path` gherkin block (story only)
+- `test_scenarios_edge`  — the `### Edge case` gherkin block (story only)
+- `acceptance_summary`   — 1–3 sentence distillation of what makes the
+  spec "done" (cross-kind, **load-bearing for drift detection** — keep
+  it tight, in the team's own words). Required for any indexable spec.
+- `context`, `decision`, `consequences` — ADR-only sections
+- `goals`, `constraints`, `stories_in_scope` — epic-only sections
+
+For any section absent in the source, set the value to `""` (empty
+string) — **don't** invent content. The structure is required; the
+content is honest.
+
+`template_compliance` — one of:
+
+- `"full"`         — all required sections for the kind are present and non-empty
+- `"partial"`      — some required sections are present, some are missing
+- `"non-compliant"`— no required sections for this kind are present (raw spec)
+- `"n/a"`          — kind is generic/unknown; can't be classified
+
+Required sections by kind:
+- `story`: user_story, acceptance_criteria, test_scenarios_(happy|error|edge), acceptance_summary
+- `adr`:   context, decision, consequences
+- `epic`:  goals, stories_in_scope
 
 ## Rules
 

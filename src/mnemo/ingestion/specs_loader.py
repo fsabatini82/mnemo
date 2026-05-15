@@ -24,7 +24,34 @@ from typing import Any
 import yaml
 
 from mnemo.core.models import Document
+from mnemo.ingestion.sections import extract_h2_sections, extract_h3_sections
 from mnemo.lifecycle import normalize as normalize_lifecycle
+
+# Canonical mapping: markdown H2 heading (lowercased) → metadata key.
+# Sections not in this map are ignored by the structured extractor;
+# they still live in the indexed text body for semantic retrieval.
+_H2_TO_METADATA: dict[str, str] = {
+    # Story sections
+    "user story": "user_story",
+    "acceptance criteria": "acceptance_criteria",
+    # ADR sections
+    "context": "context",
+    "decision": "decision",
+    "consequences": "consequences",
+    # Epic sections
+    "goals": "goals",
+    "constraints": "constraints",
+    "stories in scope": "stories_in_scope",
+    # Cross-kind (load-bearing for drift detection)
+    "acceptance summary": "acceptance_summary",
+}
+
+# H3 subsections inside `## Test Scenarios`.
+_TEST_SCENARIO_H3: dict[str, str] = {
+    "happy path": "test_scenarios_happy",
+    "error path": "test_scenarios_error",
+    "edge case":  "test_scenarios_edge",
+}
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
@@ -47,6 +74,13 @@ def parse_spec(path: Path, root: Path) -> Document:
     metadata.setdefault("kind", _infer_kind(path, root))
     # Lifecycle: normalized to the canonical vocabulary; empty when absent.
     metadata["lifecycle"] = normalize_lifecycle(metadata.get("lifecycle"))
+    # Structured template sections → flat metadata fields. Missing sections
+    # land as empty strings (back-compat with pre-template specs).
+    metadata.update(_extract_template_sections(body))
+    metadata["template_compliance"] = _compute_compliance(
+        kind=str(metadata.get("kind") or ""),
+        sections=metadata,
+    )
 
     # The doc id favors the frontmatter `id` (e.g. "US-102") and falls
     # back to the relative path. Stable IDs let re-ingest behave as upsert.
@@ -75,6 +109,58 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
     if not isinstance(metadata, dict):
         return {}, raw
     return metadata, body
+
+
+def _extract_template_sections(body: str) -> dict[str, str]:
+    """Pull canonical template sections out of the markdown body.
+
+    Returns a dict where every expected metadata key is present (empty
+    string if the corresponding section is missing). Keeping the keys
+    stable lets the agent rely on them downstream without having to
+    test for absence.
+    """
+    h2 = extract_h2_sections(body)
+    result: dict[str, str] = {meta_key: "" for meta_key in _H2_TO_METADATA.values()}
+    for h2_heading, meta_key in _H2_TO_METADATA.items():
+        if content := h2.get(h2_heading):
+            result[meta_key] = content
+
+    # H3 subsections under "## Test Scenarios"
+    for meta_key in _TEST_SCENARIO_H3.values():
+        result[meta_key] = ""
+    if test_block := h2.get("test scenarios"):
+        h3 = extract_h3_sections(test_block)
+        for h3_heading, meta_key in _TEST_SCENARIO_H3.items():
+            if content := h3.get(h3_heading):
+                result[meta_key] = content
+
+    return result
+
+
+def _compute_compliance(*, kind: str, sections: dict[str, Any]) -> str:
+    """Classify how closely the source matches the canonical template.
+
+    Values: "full" | "partial" | "non-compliant" | "n/a"
+    (`n/a` for unknown kinds — we don't fail an ingest for that).
+    """
+    required_by_kind: dict[str, tuple[str, ...]] = {
+        "story": (
+            "user_story", "acceptance_criteria",
+            "test_scenarios_happy", "test_scenarios_error", "test_scenarios_edge",
+            "acceptance_summary",
+        ),
+        "adr": ("context", "decision", "consequences"),
+        "epic": ("goals", "stories_in_scope"),
+    }
+    expected = required_by_kind.get(kind)
+    if expected is None:
+        return "n/a"
+    present = [key for key in expected if str(sections.get(key) or "").strip()]
+    if len(present) == len(expected):
+        return "full"
+    if not present:
+        return "non-compliant"
+    return "partial"
 
 
 def _infer_kind(path: Path, root: Path) -> str:
