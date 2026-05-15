@@ -20,6 +20,7 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -27,11 +28,20 @@ from mcp.server.fastmcp import FastMCP
 from mnemo.audit import AuditEngine, _worst_severity
 from mnemo.audit_deep import DeepAuditEngine
 from mnemo.config import Settings, load_settings
+from mnemo.env_file import commit_change
 from mnemo.factory import MnemoSystem, build_system
 from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
 from mnemo.lifecycle import assert_canonical as _assert_canonical_lifecycle
 from mnemo.models_catalog import resolve_token_from_env
 from mnemo.registry import ENVIRONMENTS
+from mnemo.runtime_config import (
+    CATEGORY,
+    ConfigCategory,
+    InvalidConfigValue,
+    UnknownConfigKey,
+    classify,
+    validate_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +262,136 @@ def audit_implemented_specs() -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_runtime_config() -> dict[str, Any]:
+    """Show current Mnemo settings, categorized by mutability.
+
+    Returns four buckets:
+      - editable_now           : safe to change from chat; takes effect
+                                 on the next MCP tool call (no restart).
+      - editable_with_restart  : structural — change requires the server
+                                 to be restarted to take effect. Mnemo
+                                 also requires confirm_structural=True
+                                 in set_runtime_config to write these.
+      - readonly               : scope or security-sensitive. Refused
+                                 by set_runtime_config.
+      - hidden                 : token-shaped. Names are listed only if
+                                 the env var is currently set; values
+                                 are NEVER returned.
+    """
+    settings, _ = _require_loaded()
+    buckets: dict[str, Any] = {
+        "editable_now": {},
+        "editable_with_restart": {},
+        "readonly": {},
+        "hidden": [],
+    }
+    for key, cat in CATEGORY.items():
+        if cat == ConfigCategory.HIDDEN:
+            if os.environ.get(key):
+                buckets["hidden"].append(key)
+            continue
+        current = _current_value_for(key, settings)
+        buckets[cat.value][key] = current
+    return buckets
+
+
+@mcp.tool()
+def set_runtime_config(
+    key: str,
+    value: str,
+    confirm_structural: bool = False,
+) -> dict[str, Any]:
+    """Update a Mnemo configuration value in both the live process and `.env`.
+
+    Behavior depends on the key's category (see `list_runtime_config`):
+
+    - **editable_now**: applied immediately. `os.environ[key]` is
+      updated, the `.env` file is rewritten with an audit comment, and
+      the cached Settings are reloaded so subsequent tool calls see the
+      new value.
+    - **editable_with_restart**: requires `confirm_structural=True`.
+      Writes to `.env` and `os.environ`, but the running system keeps
+      using the old value until `mnemo-server` is restarted.
+    - **readonly / hidden / unknown**: refused with a clear error.
+
+    Args:
+        key: Full env var name (e.g. `MNEMO_GHMODELS_MODEL`).
+        value: New value as a string.
+        confirm_structural: Required = True for `editable_with_restart`
+            keys, ignored for others.
+    """
+    settings, _ = _require_loaded()
+
+    try:
+        cat = classify(key)
+    except UnknownConfigKey as exc:
+        return {"error": str(exc), "key": key}
+
+    if cat == ConfigCategory.HIDDEN:
+        return {
+            "error": (
+                f"Key {key!r} is a token. Tokens must be exported in the "
+                "shell environment, not set via MCP."
+            ),
+            "key": key, "category": cat.value,
+        }
+    if cat == ConfigCategory.READONLY:
+        return {
+            "error": (
+                f"Key {key!r} is read-only via MCP "
+                "(scope/security-sensitive)."
+            ),
+            "key": key, "category": cat.value,
+        }
+    if cat == ConfigCategory.EDITABLE_WITH_RESTART and not confirm_structural:
+        return {
+            "error": (
+                f"Key {key!r} is structural and requires "
+                "`confirm_structural=True` (the change will only take "
+                "effect after restarting mnemo-server)."
+            ),
+            "key": key, "category": cat.value,
+        }
+
+    try:
+        validate_value(key, value)
+    except (InvalidConfigValue, UnknownConfigKey) as exc:
+        return {"error": str(exc), "key": key, "category": cat.value}
+
+    env_path = (settings.persist_dir.parent / ".env").resolve()
+    # Prefer the cwd-relative `.env` if it exists (typical for installs);
+    # fall back to persist_dir/.env (uncommon, but explicit).
+    cwd_env = (Path.cwd() / ".env").resolve()
+    target = cwd_env if cwd_env.is_file() else env_path
+
+    try:
+        old_value = commit_change(target, key, value)
+    except OSError as exc:
+        return {
+            "error": f"Failed to write {target}: {exc}",
+            "key": key, "category": cat.value,
+        }
+
+    # Apply to the live process env so subsequent runner calls pick it up.
+    os.environ[key] = value
+
+    takes_effect = "immediately" if cat == ConfigCategory.EDITABLE_NOW else "on_restart"
+    if cat == ConfigCategory.EDITABLE_NOW:
+        # Reload cached settings so Mnemo's own tools see the new value.
+        global _settings
+        _settings = load_settings()
+
+    return {
+        "key": key,
+        "old_value": old_value,
+        "new_value": value,
+        "category": cat.value,
+        "takes_effect": takes_effect,
+        "env_file": str(target),
+    }
+
+
+@mcp.tool()
 def mnemo_info() -> dict[str, Any]:
     """Return the active configuration — useful for sanity checks in demos."""
     settings, system = _require_loaded()
@@ -294,6 +434,21 @@ def mnemo_info() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _current_value_for(key: str, settings: Settings) -> str:
+    """Return the live value for `key`, preferring os.environ, then Settings.
+
+    Settings field names are the env var stripped of `MNEMO_` prefix and
+    lowercased (pydantic-settings convention).
+    """
+    if value := os.environ.get(key):
+        return value
+    if key.startswith("MNEMO_"):
+        field_name = key[len("MNEMO_"):].lower()
+        if field_name in Settings.model_fields:
+            return str(getattr(settings, field_name))
+    return ""
 
 
 def _hit_to_dict(h: Any) -> dict[str, Any]:
