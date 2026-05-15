@@ -61,6 +61,26 @@ class Settings(BaseSettings):
     # The audit engine resolves `related_files` paths against this root.
     code_root: Path = Path(".")
 
+    # ----- Family aliases -------------------------------------------------
+    # `--agentic <family>` resolves to the value configured here. Change
+    # one .env line to bump a whole family to a new version. Values are
+    # Mnemo short-names (e.g. "gpt-5-mini") or full IDs ("openai/gpt-5").
+    family_gpt: str = "gpt-5-mini"
+    family_claude: str = "claude-sonnet-4-6"
+    family_sonnet: str = "claude-sonnet-4-6"
+    family_opus: str = "claude-opus-4-6"
+
+    # ----- GitHub Models (curl runtime) -----------------------------------
+    # The token (`MNEMO_GHMODELS_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) is
+    # NOT stored in Settings — it's read from os.environ directly by the
+    # runner, so it never lands in the .env file or in `mnemo_info` output.
+    ghmodels_endpoint: str = "https://models.github.ai/inference/chat/completions"
+    ghmodels_catalog_endpoint: str = "https://models.github.ai/catalog/models"
+    ghmodels_model: str = "openai/gpt-5-mini"
+    ghmodels_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "medium"
+    ghmodels_max_completion_tokens: int = Field(default=6000, gt=0)
+    ghmodels_timeout_seconds: int = Field(default=180, gt=0)
+
     model_config = SettingsConfigDict(
         env_prefix="MNEMO_",
         env_file=".env",

@@ -141,3 +141,101 @@ def test_specs_rejects_invalid_project_slug() -> None:
 def test_specs_rejects_invalid_environment() -> None:
     with pytest.raises(SystemExit):
         cli.main(["specs", "--env", "uat"])  # not in enum
+
+
+# ---------------------------------------------------------------------------
+# --agentic semantics (F6) + --reasoning-effort
+# ---------------------------------------------------------------------------
+
+
+def test_specs_agentic_bare_defaults_to_gpt5_mini(
+    patched_system, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--agentic` with no value should build a gpt-5-mini runner."""
+    seen: dict[str, str] = {}
+
+    class _FakeRunner:
+        def is_available(self): return True
+        def describe(self): return "Fake(openai/gpt-5-mini)"
+
+    def fake_build(value, settings, *, reasoning_effort=None):
+        seen["agentic"] = value
+        seen["reasoning"] = reasoning_effort
+        return _FakeRunner()
+
+    monkeypatch.setattr("mnemo.cli.build_runner", fake_build)
+
+    # Use a do-nothing agent that doesn't actually call the runner.
+    class _NoopAgent:
+        def __init__(self, runner): pass
+        def ingest(self, source): return []
+
+    monkeypatch.setattr("mnemo.ingestion.agents.copilot.specs_agent.CopilotSpecsAgent",
+                       _NoopAgent)
+    # No docs means rc=1 (warning), but we just care about the flag plumbing.
+    cli.main(["specs", "--agentic"])
+    assert seen["agentic"] == "gpt-5-mini"
+    # Task-default for ingest is "low"
+    assert seen["reasoning"] == "low"
+
+
+def test_specs_agentic_with_explicit_model(
+    patched_system, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, str] = {}
+
+    class _FakeRunner:
+        def is_available(self): return True
+        def describe(self): return "Fake"
+
+    def fake_build(value, settings, *, reasoning_effort=None):
+        seen["agentic"] = value
+        return _FakeRunner()
+
+    monkeypatch.setattr("mnemo.cli.build_runner", fake_build)
+    monkeypatch.setattr("mnemo.ingestion.agents.copilot.specs_agent.CopilotSpecsAgent",
+                       type("A", (), {
+                           "__init__": lambda self, runner: None,
+                           "ingest": lambda self, source: [],
+                       }))
+    cli.main(["specs", "--agentic", "gpt-5"])
+    assert seen["agentic"] == "gpt-5"
+
+
+def test_specs_reasoning_effort_override(
+    patched_system, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--reasoning-effort overrides the task default."""
+    seen: dict[str, str] = {}
+
+    class _FakeRunner:
+        def is_available(self): return True
+        def describe(self): return "Fake"
+
+    def fake_build(value, settings, *, reasoning_effort=None):
+        seen["reasoning"] = reasoning_effort
+        return _FakeRunner()
+
+    monkeypatch.setattr("mnemo.cli.build_runner", fake_build)
+    monkeypatch.setattr("mnemo.ingestion.agents.copilot.specs_agent.CopilotSpecsAgent",
+                       type("A", (), {
+                           "__init__": lambda self, runner: None,
+                           "ingest": lambda self, source: [],
+                       }))
+    cli.main(["specs", "--agentic", "gpt-5", "--reasoning-effort", "high"])
+    assert seen["reasoning"] == "high"
+
+
+def test_specs_agentic_unavailable_runner_exits(
+    patched_system, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DeadRunner:
+        def is_available(self): return False
+        def describe(self): return "DeadRunner()"
+
+    monkeypatch.setattr(
+        "mnemo.cli.build_runner",
+        lambda *a, **kw: _DeadRunner(),
+    )
+    with pytest.raises(SystemExit):
+        cli.main(["specs", "--agentic", "gpt-5"])

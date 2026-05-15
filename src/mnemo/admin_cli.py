@@ -1,4 +1,4 @@
-"""Mnemo admin CLI — manage the project registry and scaffold specs.
+"""Mnemo admin CLI — manage the project registry, scaffold specs, inspect models.
 
 Subcommands:
   list-projects           Show registered projects, their IDs and envs.
@@ -7,11 +7,13 @@ Subcommands:
   show-collection-names   Resolve and print the effective collection names.
   new-spec                Scaffold a new spec from a canonical template
                           (story | adr | epic).
+  list-models             List configured family aliases + curated short-names
+                          + cross-check against the live GH Models catalog.
+  test-runtime            Send a sanity prompt through the selected runtime
+                          and report latency + token usage.
 
 The registry lives at `<MNEMO_PERSIST_DIR>/projects.json`. Underlying
-collection drops happen in Chroma/LanceDB and are best-effort: if the
-store backend doesn't have the collection, that's logged but not an
-error.
+collection drops happen in Chroma/LanceDB and are best-effort.
 """
 
 from __future__ import annotations
@@ -23,6 +25,15 @@ from pathlib import Path
 from typing import Any
 
 from mnemo.config import load_settings
+from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
+from mnemo.models_catalog import (
+    FAMILY_TO_SETTING,
+    MODEL_SHORTNAMES,
+    fetch_catalog_models,
+    list_shortnames,
+    resolve_model,
+    resolve_token_from_env,
+)
 from mnemo.registry import (
     ENVIRONMENTS,
     ProjectRegistry,
@@ -147,6 +158,89 @@ def _cmd_new_spec(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list_models(args: argparse.Namespace) -> int:
+    """Show configured family aliases + short-names, cross-check live catalog."""
+    settings = load_settings()
+
+    # Pre-fetch the live catalog (if token available). Catalog may be empty
+    # on auth/network issues — that's fine, we degrade gracefully.
+    token = resolve_token_from_env()
+    catalog: set[str] = set()
+    if token:
+        live = fetch_catalog_models(token, settings.ghmodels_catalog_endpoint)
+        catalog = set(live)
+    else:
+        print("(no token — skipping live catalog cross-check)")
+        print("set MNEMO_GHMODELS_TOKEN / GH_TOKEN / GITHUB_TOKEN to enable it\n")
+
+    print("Configured family aliases:")
+    for alias, setting_attr in FAMILY_TO_SETTING.items():
+        raw = getattr(settings, setting_attr, "")
+        try:
+            full = resolve_model(alias, settings)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {alias:<8} → (unresolved: {exc})")
+            continue
+        mark = _catalog_mark(full, catalog)
+        print(f"  {alias:<8} → {full:<40} (setting: {raw}) {mark}")
+
+    print("\nMnemo curated short-names:")
+    for short in list_shortnames():
+        full = MODEL_SHORTNAMES[short]
+        mark = _catalog_mark(full, catalog)
+        print(f"  {short:<20} → {full:<40} {mark}")
+
+    if catalog:
+        known = set(MODEL_SHORTNAMES.values())
+        extras = sorted(catalog - known)
+        if extras:
+            print("\nAvailable in catalog but not in short-names "
+                  "(use --agentic <full-id> to access):")
+            for ident in extras:
+                print(f"  {ident}")
+    return 0
+
+
+def _catalog_mark(full_id: str, catalog: set[str]) -> str:
+    if not catalog:
+        return ""
+    return "[✓ in catalog]" if full_id in catalog else "[✗ not in catalog]"
+
+
+def _cmd_test_runtime(args: argparse.Namespace) -> int:
+    """Send a sanity prompt through the selected runtime."""
+    import time
+
+    settings = load_settings()
+    agentic_value = args.agentic or settings.ghmodels_model
+    effort = args.reasoning_effort or settings.ghmodels_reasoning_effort
+    try:
+        runner = build_runner(agentic_value, settings, reasoning_effort=effort)
+    except RunnerBuildError as exc:
+        logger.error("%s", exc)
+        return 2
+
+    if not runner.is_available():
+        logger.error("Runner not ready: %s", runner.describe())
+        return 2
+
+    print(f"Runner: {runner.describe()}")
+    prompt = "Reply with the single word 'ok' and nothing else."
+    started = time.monotonic()
+    try:
+        content = runner.run(prompt)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Runtime call failed: %s", exc)
+        return 1
+    elapsed = time.monotonic() - started
+
+    preview = content.strip()[:200]
+    print(f"Latency:        {elapsed:.2f}s")
+    print(f"Content bytes:  {len(content)}")
+    print(f"Content preview: {preview!r}")
+    return 0
+
+
 def _cmd_show(args: argparse.Namespace) -> int:
     """Resolve the effective collection names for a project/env combo."""
     settings = load_settings()
@@ -262,6 +356,37 @@ def _build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--force", action="store_true",
                        help="Overwrite the output file if it already exists.")
     p_new.set_defaults(func=_cmd_new_spec)
+
+    p_list_models = sub.add_parser(
+        "list-models",
+        help="List configured family aliases + short-names + live catalog cross-check.",
+    )
+    p_list_models.set_defaults(func=_cmd_list_models)
+
+    p_test = sub.add_parser(
+        "test-runtime",
+        help="Send a sanity prompt through the selected runtime; report latency + tokens.",
+    )
+    p_test.add_argument(
+        "--agentic",
+        nargs="?",
+        const=None,
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Runtime to test. Without value: uses MNEMO_GHMODELS_MODEL. "
+            "`copilot`: subprocess CLI. Or any short-name / family alias "
+            "/ full id."
+        ),
+    )
+    p_test.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        choices=["minimal", "low", "medium", "high"],
+        default=None,
+        help="Override reasoning_effort for this test call.",
+    )
+    p_test.set_defaults(func=_cmd_test_runtime)
 
     return parser
 

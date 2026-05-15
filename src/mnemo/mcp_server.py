@@ -28,7 +28,9 @@ from mnemo.audit import AuditEngine, _worst_severity
 from mnemo.audit_deep import DeepAuditEngine
 from mnemo.config import Settings, load_settings
 from mnemo.factory import MnemoSystem, build_system
+from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
 from mnemo.lifecycle import assert_canonical as _assert_canonical_lifecycle
+from mnemo.models_catalog import resolve_token_from_env
 from mnemo.registry import ENVIRONMENTS
 
 logger = logging.getLogger(__name__)
@@ -122,17 +124,25 @@ def get_bug(bug_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def audit_spec(spec_id: str, deep: bool = False) -> dict[str, Any]:
+def audit_spec(
+    spec_id: str,
+    deep: bool = False,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Run drift checks against a single spec.
 
     By default runs the cheap deterministic checks (status / coverage /
     template). Pass `deep=True` to also run the LLM-powered behavior
-    drift check via Copilot CLI — slower but catches divergences cheap
-    checks can't see.
+    drift check — slower but catches divergences cheap checks can't see.
 
-    Returns a structured report with `severity` (none/low/medium/high)
-    and a list of `issues`, each tagged by type (status / coverage_over
-    / coverage_under / template / behavior).
+    Args:
+        spec_id: Spec identifier (e.g. "US-102").
+        deep: When True, also run the behavior audit via an LLM.
+        model: Optional model override for the deep audit. Accepts
+            short-names ("gpt-5", "gpt-5-mini", "claude-opus-4-6"),
+            family aliases ("gpt", "claude", "opus", "sonnet"), full
+            ids ("openai/gpt-5"), or "copilot" for the subprocess CLI.
+            Falls back to MNEMO_GHMODELS_MODEL when omitted.
     """
     settings, system = _require_loaded()
     engine = AuditEngine(system.specs, code_root=settings.code_root)
@@ -143,9 +153,9 @@ def audit_spec(spec_id: str, deep: bool = False) -> dict[str, Any]:
             "error": f"Spec {spec_id!r} not found in the active project's specs collection.",
         }
     if deep:
-        deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
-        if not deep_engine.is_available():
-            report.issues.append(_copilot_unavailable_issue())
+        deep_engine = _build_deep_engine(settings, system, model)
+        if deep_engine is None:
+            report.issues.append(_runner_unavailable_issue(model))
         else:
             deep_issues = deep_engine.audit_spec(spec_id)
             if deep_issues:
@@ -155,19 +165,27 @@ def audit_spec(spec_id: str, deep: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
-def audit_spec_behavior(spec_id: str) -> dict[str, Any]:
+def audit_spec_behavior(spec_id: str, model: str | None = None) -> dict[str, Any]:
     """Run only the LLM-powered behavior drift check (deep audit).
 
     Use this when the cheap checks already passed but you suspect the
     code's actual behavior may have drifted from the spec semantics.
-    Requires the Copilot CLI to be installed and authenticated.
+
+    Args:
+        spec_id: Spec identifier (e.g. "US-102").
+        model: Optional model override. Same options as `audit_spec`.
+            Default: MNEMO_GHMODELS_MODEL.
     """
     settings, system = _require_loaded()
-    deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
-    if not deep_engine.is_available():
+    deep_engine = _build_deep_engine(settings, system, model)
+    if deep_engine is None:
         return {
             "spec_id": spec_id,
-            "error": "Copilot CLI not available — configure MNEMO_COPILOT_BIN.",
+            "error": (
+                f"Runner unavailable for model={model or settings.ghmodels_model!r}. "
+                "Set MNEMO_GHMODELS_TOKEN (or GH_TOKEN/GITHUB_TOKEN) for "
+                "GitHub Models, or pass model='copilot' for the subprocess CLI."
+            ),
         }
     issues = deep_engine.audit_spec(spec_id)
     return {
@@ -178,16 +196,39 @@ def audit_spec_behavior(spec_id: str) -> dict[str, Any]:
     }
 
 
-def _copilot_unavailable_issue() -> Any:
+def _build_deep_engine(
+    settings: Settings,
+    system: MnemoSystem,
+    model: str | None,
+) -> DeepAuditEngine | None:
+    """Build the deep-audit engine with optional per-call model override."""
+    agentic_value = model or settings.ghmodels_model
+    try:
+        runner = build_runner(agentic_value, settings)
+    except RunnerBuildError as exc:
+        logger.warning("Deep audit: %s", exc)
+        return None
+    engine = DeepAuditEngine(system.specs, code_root=settings.code_root, runner=runner)
+    if not engine.is_available():
+        logger.warning("Deep audit runner not available: %s", runner.describe())
+        return None
+    return engine
+
+
+def _runner_unavailable_issue(model: str | None) -> Any:
     from mnemo.audit import DriftIssue
     return DriftIssue(
         type="behavior",
         severity="low",
         description=(
-            "Deep audit requested but Copilot CLI is not available. "
-            "Cheap-only results returned."
+            "Deep audit requested but the LLM runner is not available "
+            f"(requested model: {model or 'default'}). Cheap-only results returned."
         ),
-        suggested_action="Set MNEMO_COPILOT_BIN to a working Copilot CLI binary.",
+        suggested_action=(
+            "Set MNEMO_GHMODELS_TOKEN (or GH_TOKEN/GITHUB_TOKEN) for "
+            "GitHub Models, or configure MNEMO_COPILOT_BIN if you intended "
+            "to use the subprocess Copilot CLI."
+        ),
     )
 
 
@@ -235,6 +276,18 @@ def mnemo_info() -> dict[str, Any]:
             "overlap": settings.chunk_overlap,
         },
         "top_k": settings.top_k,
+        "ghmodels": {
+            "model": settings.ghmodels_model,
+            "reasoning_effort": settings.ghmodels_reasoning_effort,
+            "max_completion_tokens": settings.ghmodels_max_completion_tokens,
+            "token_present": resolve_token_from_env() is not None,
+        },
+        "family_aliases": {
+            "gpt": settings.family_gpt,
+            "claude": settings.family_claude,
+            "sonnet": settings.family_sonnet,
+            "opus": settings.family_opus,
+        },
     }
 
 

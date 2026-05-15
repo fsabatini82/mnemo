@@ -166,7 +166,6 @@ def test_drift_deep_merges_issues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When deep is available and returns drift, cheap + deep merge into one report."""
-    # Patch DeepAuditEngine to skip the binary check and inject fake issues.
     from mnemo.audit import DriftIssue
 
     class _FakeDeepEngine:
@@ -181,11 +180,50 @@ def test_drift_deep_merges_issues(
                 )]
             return []
 
+    # Patch the engine + the runner factory so we never hit a real runner.
     monkeypatch.setattr("mnemo.audit_cli.DeepAuditEngine", _FakeDeepEngine)
+    monkeypatch.setattr(
+        "mnemo.audit_cli.build_runner",
+        lambda *a, **kw: type("FR", (), {
+            "is_available": lambda self: True,
+            "describe": lambda self: "FakeRunner()",
+        })(),
+    )
     out_file = tmp_path / "r.json"
     rc = audit_cli.main(["drift", "--spec", "US-102", "--deep", "-o", str(out_file)])
-    # US-102 cheap was clean but deep flagged high → exit 1
     assert rc == 1
     payload = json.loads(out_file.read_text(encoding="utf-8"))
     issue_types = {i["type"] for r in payload["reports"] for i in r["issues"]}
     assert "behavior" in issue_types
+
+
+def test_drift_agentic_implies_deep(
+    patched_system: tuple[_RecordingPipeline, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--agentic on audit should activate --deep automatically."""
+    seen: dict[str, bool] = {"deep_engine_used": False}
+
+    class _FakeDeepEngine:
+        def __init__(self, pipeline, *, code_root, **_kw):
+            seen["deep_engine_used"] = True
+        def is_available(self): return True
+        def audit_spec(self, spec_id): return []
+
+    monkeypatch.setattr("mnemo.audit_cli.DeepAuditEngine", _FakeDeepEngine)
+    monkeypatch.setattr(
+        "mnemo.audit_cli.build_runner",
+        lambda *a, **kw: type("FR", (), {
+            "is_available": lambda self: True,
+            "describe": lambda self: "FakeRunner()",
+        })(),
+    )
+    audit_cli.main(["drift", "--spec", "US-102", "--agentic", "gpt-5-mini"])
+    assert seen["deep_engine_used"] is True
+
+
+def test_drift_invalid_reasoning_effort_argparse_error(
+    patched_system: tuple[_RecordingPipeline, Path],
+) -> None:
+    with pytest.raises(SystemExit):
+        audit_cli.main(["drift", "--deep", "--reasoning-effort", "wow"])

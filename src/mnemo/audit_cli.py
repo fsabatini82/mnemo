@@ -27,8 +27,14 @@ from mnemo.audit import AuditEngine, DriftReport, _worst_severity
 from mnemo.audit_deep import DeepAuditEngine
 from mnemo.config import load_settings
 from mnemo.factory import build_system
+from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
 from mnemo.lifecycle import LIFECYCLE_VALUES, assert_canonical
+from mnemo.models_catalog import list_shortnames
 from mnemo.registry import ENVIRONMENTS
+
+# Audit needs reasoning (compare spec semantics with code behavior).
+# Medium is the right default; CLI flag overrides per invocation.
+_AUDIT_DEFAULT_EFFORT = "medium"
 
 logger = logging.getLogger("mnemo-audit")
 
@@ -61,14 +67,31 @@ def _cmd_drift(args: argparse.Namespace) -> int:
             assert_canonical(lifecycle)
         reports = engine.audit_all(lifecycle=lifecycle)
 
+    # `--agentic` on audit implies `--deep` (cheap path doesn't use LLM).
+    if args.agentic is not None:
+        args.deep = True
+
     if args.deep:
-        deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
+        # Default to GH Models with gpt-5-mini when --agentic not passed.
+        agentic_value = args.agentic or "gpt-5-mini"
+        effort = args.reasoning_effort or _AUDIT_DEFAULT_EFFORT
+        try:
+            runner = build_runner(agentic_value, settings, reasoning_effort=effort)
+        except RunnerBuildError as exc:
+            logger.error("%s", exc)
+            return 2
+        deep_engine = DeepAuditEngine(
+            system.specs, code_root=settings.code_root, runner=runner,
+        )
         if not deep_engine.is_available():
             logger.error(
-                "Deep audit requested but Copilot CLI not found. "
-                "Configure MNEMO_COPILOT_BIN or omit --deep."
+                "Deep audit runner not ready: %s. "
+                "Configure MNEMO_GHMODELS_TOKEN (or GH_TOKEN/GITHUB_TOKEN), "
+                "or pass --agentic copilot to use the subprocess CLI.",
+                runner.describe(),
             )
             return 2
+        logger.info("Using deep audit runner: %s", runner.describe())
         for r in reports:
             deep_issues = deep_engine.audit_spec(r.spec_id)
             if deep_issues:
@@ -163,10 +186,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_drift.add_argument(
         "--deep", action="store_true",
         help=(
-            "Also run the LLM-powered behavior drift check via Copilot CLI "
-            "(one LLM call per implemented spec — slower but catches "
-            "divergences cheap checks can't see). Requires MNEMO_COPILOT_BIN "
-            "and an authenticated Copilot CLI on PATH."
+            "Also run the LLM-powered behavior drift check (one LLM call "
+            "per implemented spec — slower but catches divergences cheap "
+            "checks can't see). Pair with --agentic to choose the runtime."
+        ),
+    )
+    p_drift.add_argument(
+        "--agentic",
+        nargs="?",
+        const="gpt-5-mini",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Runner for the deep audit. Default (bare flag): GitHub Models "
+            "with gpt-5-mini. `copilot`: subprocess Copilot CLI. Or any "
+            f"short-name: {', '.join(list_shortnames())}. Family aliases: "
+            "gpt, claude, sonnet, opus. Or a full id (openai/gpt-5, ...). "
+            "Implies --deep when used."
+        ),
+    )
+    p_drift.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        choices=["minimal", "low", "medium", "high"],
+        default=None,
+        help=(
+            "Override reasoning_effort for the deep audit. "
+            f"Default for audit: {_AUDIT_DEFAULT_EFFORT} (semantic comparison "
+            "benefits from real reasoning budget)."
         ),
     )
     p_drift.set_defaults(func=_cmd_drift)

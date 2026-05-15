@@ -5,13 +5,17 @@ The first ingest for a new project auto-registers it in the project
 registry (`<persist_dir>/projects.json`). Server-side reads stay
 read-only and never touch the registry.
 
-Two ingestion modes, opt-in per invocation:
+Three ingestion modes, opt-in per invocation:
 
-- **deterministic** (default): the loader adapters parse files
-  mechanically. Fast, predictable, no external dependencies.
-- **agentic copilot** (`--agentic copilot`): an LLM-powered agent
-  driven by the GitHub Copilot CLI extracts structured metadata,
-  classifies items as indexable vs noise, enriches cross-references.
+- **deterministic** (no `--agentic` flag): the loader adapters parse
+  files mechanically. Fast, predictable, no external dependencies.
+- **agentic via GitHub Models** (`--agentic` or `--agentic <model>`):
+  HTTP call to GH Models with the chosen model. Predictable costs,
+  reasoning_effort tunable, requires a token with `models:read` scope.
+- **agentic via subprocess Copilot CLI** (`--agentic copilot`): drives
+  the local `gh copilot` / `copilot` binary in auto-model mode. Use
+  when you don't want explicit model control and have the CLI
+  installed locally.
 """
 
 from __future__ import annotations
@@ -28,13 +32,17 @@ from mnemo.config import load_settings
 from mnemo.core.models import Document
 from mnemo.core.protocols import RagPipeline
 from mnemo.factory import build_system
+from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
 from mnemo.ingestion.bugs_loader import load_bugs
 from mnemo.ingestion.specs_loader import load_specs
+from mnemo.models_catalog import list_shortnames
 from mnemo.registry import ENVIRONMENTS, validate_environment, validate_slug
 
 logger = logging.getLogger("mnemo")
 
-AgentRuntime = Literal["copilot"]
+# Task-specific reasoning_effort defaults: ingestion is high-volume structured
+# extraction (low effort is fine); audit needs reasoning (medium).
+_INGEST_DEFAULT_EFFORT = "low"
 
 
 # ---------------------------------------------------------------------------
@@ -42,44 +50,50 @@ AgentRuntime = Literal["copilot"]
 # ---------------------------------------------------------------------------
 
 
-def _load_specs(source: Path, agent: AgentRuntime | None) -> list[Document]:
-    if agent is None:
+def _build_agentic_runner(args: argparse.Namespace, settings: Any) -> Any | None:
+    """Shared runner construction for both ingestion subcommands.
+
+    Returns None for deterministic mode. On failure (unknown model,
+    missing token/binary) exits with a clear message — does not fall
+    back silently to deterministic.
+    """
+    agentic_value = getattr(args, "agentic", None)
+    if agentic_value is None:
+        return None
+
+    effort_override = getattr(args, "reasoning_effort", None) or _INGEST_DEFAULT_EFFORT
+    try:
+        runner = build_runner(agentic_value, settings, reasoning_effort=effort_override)
+    except RunnerBuildError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(2)
+
+    if not runner.is_available():
+        logger.error(
+            "Selected runner not ready: %s. "
+            "Configure the required token/binary or omit --agentic to use "
+            "the deterministic loader.",
+            runner.describe(),
+        )
+        raise SystemExit(2)
+    logger.info("Using agentic ingestion: %s", runner.describe())
+    return runner
+
+
+def _load_specs(source: Path, runner: Any | None) -> list[Document]:
+    if runner is None:
         return load_specs(source)
-    if agent == "copilot":
-        from mnemo.ingestion.agents.copilot.runner import CopilotRunner
-        from mnemo.ingestion.agents.copilot.specs_agent import CopilotSpecsAgent
+    from mnemo.ingestion.agents.copilot.specs_agent import CopilotSpecsAgent
 
-        runner = CopilotRunner()
-        if not runner.is_available():
-            logger.error(
-                "Copilot CLI not found (%s). Configure MNEMO_COPILOT_BIN, "
-                "or run without --agentic to fall back to the deterministic loader.",
-                runner.describe(),
-            )
-            raise SystemExit(2)
-        logger.info("Using agentic ingestion: %s", runner.describe())
-        return CopilotSpecsAgent(runner=runner).ingest(source)
-    raise ValueError(f"Unknown agent runtime: {agent!r}")
+    return CopilotSpecsAgent(runner=runner).ingest(source)
 
 
-def _load_bugs(source: Path, agent: AgentRuntime | None) -> list[Document]:
-    if agent is None:
+def _load_bugs(source: Path, runner: Any | None) -> list[Document]:
+    if runner is None:
         return load_bugs(source)
-    if agent == "copilot":
-        from mnemo.ingestion.agents.copilot.bugs_agent import CopilotBugsAgent
-        from mnemo.ingestion.agents.copilot.runner import CopilotRunner
+    from mnemo.ingestion.agents.copilot.bugs_agent import CopilotBugsAgent
 
-        runner = CopilotRunner()
-        if not runner.is_available():
-            logger.error(
-                "Copilot CLI not found (%s). Configure MNEMO_COPILOT_BIN, "
-                "or run without --agentic to fall back to the deterministic loader.",
-                runner.describe(),
-            )
-            raise SystemExit(2)
-        logger.info("Using agentic ingestion: %s", runner.describe())
-        return CopilotBugsAgent(runner=runner).ingest(source)
-    raise ValueError(f"Unknown agent runtime: {agent!r}")
+    return CopilotBugsAgent(runner=runner).ingest(source)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +129,8 @@ def _cmd_specs(args: argparse.Namespace) -> int:
         settings.project, system.project_id, system.environment,
         f"{system.effective_prefix}_{settings.specs_collection}",
     )
-    docs = _load_specs(source, getattr(args, "agentic", None))
+    runner = _build_agentic_runner(args, settings)
+    docs = _load_specs(source, runner)
     return _ingest(system.specs, docs, "specs")
 
 
@@ -129,7 +144,8 @@ def _cmd_bugs(args: argparse.Namespace) -> int:
         settings.project, system.project_id, system.environment,
         f"{system.effective_prefix}_{settings.bugs_collection}",
     )
-    docs = _load_bugs(source, getattr(args, "agentic", None))
+    runner = _build_agentic_runner(args, settings)
+    docs = _load_bugs(source, runner)
     return _ingest(system.bugs, docs, "bugs")
 
 
@@ -167,11 +183,29 @@ def _add_common_flags(parser: argparse.ArgumentParser, *, hide_path: bool = Fals
     )
     parser.add_argument(
         "--agentic",
-        choices=["copilot"],
+        nargs="?",
+        const="gpt-5-mini",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Use an LLM-powered ingestion agent. Without a value: uses "
+            "GitHub Models with gpt-5-mini. With `copilot`: uses the local "
+            "subprocess Copilot CLI in auto-model mode. With a model name "
+            "or full id: uses GitHub Models with that model. "
+            f"Supported short-names: {', '.join(list_shortnames())}. "
+            "Family aliases: gpt, claude, sonnet, opus (resolved via "
+            "MNEMO_FAMILY_* settings). Or pass a full id (e.g. openai/gpt-5)."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        choices=["minimal", "low", "medium", "high"],
         default=None,
         help=(
-            "Use an LLM-powered ingestion agent instead of the deterministic "
-            "loader. Default: deterministic."
+            "Override reasoning_effort for this run. "
+            f"Default for ingestion: {_INGEST_DEFAULT_EFFORT} "
+            "(structured extraction benefits little from heavier reasoning)."
         ),
     )
 

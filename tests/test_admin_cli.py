@@ -188,3 +188,97 @@ def test_new_spec_requires_id_and_title(isolated_data: Path) -> None:
         admin_cli.main(["new-spec", "story", "--id", "US-X"])
     with pytest.raises(SystemExit):
         admin_cli.main(["new-spec", "story", "--title", "T"])
+
+
+# ---------------------------------------------------------------------------
+# list-models subcommand (F6)
+# ---------------------------------------------------------------------------
+
+
+def test_list_models_no_token_prints_aliases(
+    isolated_data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Without a token, list-models still shows family aliases + short-names."""
+    monkeypatch.delenv("MNEMO_GHMODELS_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    rc = admin_cli.main(["list-models"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Configured family aliases" in out
+    assert "gpt" in out and "opus" in out
+    assert "openai/gpt-5-mini" in out
+    assert "anthropic/claude-opus-4-6" in out
+    assert "no token" in out  # the skip-live message
+
+
+def test_list_models_with_token_runs_catalog_crosscheck(
+    isolated_data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setenv("MNEMO_GHMODELS_TOKEN", "fake-token")
+    monkeypatch.setattr(
+        "mnemo.admin_cli.fetch_catalog_models",
+        lambda token, endpoint: ["openai/gpt-5", "openai/gpt-5-mini", "openai/gpt-99"],
+    )
+    rc = admin_cli.main(["list-models"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[✓ in catalog]" in out  # known short-names crossed
+    assert "openai/gpt-99" in out    # extras section shows model not in shortnames
+
+
+# ---------------------------------------------------------------------------
+# test-runtime subcommand (F6)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_with_fake_runner(
+    isolated_data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The CLI should call build_runner and print diagnostics on success."""
+    fake_runner = type("FR", (), {
+        "is_available": lambda self: True,
+        "describe": lambda self: "FakeRunner(model=test)",
+        "run": lambda self, prompt: "ok\n",
+    })()
+    monkeypatch.setattr("mnemo.admin_cli.build_runner",
+                       lambda *a, **kw: fake_runner)
+
+    rc = admin_cli.main(["test-runtime"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "FakeRunner" in out
+    assert "Latency" in out
+    assert "Content bytes" in out
+
+
+def test_runtime_failure_returns_2(
+    isolated_data: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mnemo.ingestion.agents.runner_factory import RunnerBuildError
+
+    def boom(*a, **kw):
+        raise RunnerBuildError("simulated bad config")
+
+    monkeypatch.setattr("mnemo.admin_cli.build_runner", boom)
+    rc = admin_cli.main(["test-runtime"])
+    assert rc == 2
+
+
+def test_runtime_unavailable_runner_returns_2(
+    isolated_data: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_runner = type("FR", (), {
+        "is_available": lambda self: False,
+        "describe": lambda self: "FakeRunner(unavailable)",
+    })()
+    monkeypatch.setattr("mnemo.admin_cli.build_runner",
+                       lambda *a, **kw: fake_runner)
+    rc = admin_cli.main(["test-runtime"])
+    assert rc == 2
