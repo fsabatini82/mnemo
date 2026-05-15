@@ -143,3 +143,49 @@ def test_drift_rejects_invalid_lifecycle(
 def test_drift_requires_subcommand() -> None:
     with pytest.raises(SystemExit):
         audit_cli.main([])
+
+
+# ---------------------------------------------------------------------------
+# --deep flag (F5)
+# ---------------------------------------------------------------------------
+
+
+def test_drift_deep_unavailable_returns_2(
+    patched_system: tuple[_RecordingPipeline, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If Copilot CLI is missing, --deep must error out (rc=2)."""
+    monkeypatch.setenv("MNEMO_COPILOT_BIN", "/definitely/not/installed/copilot")
+    rc = audit_cli.main(["drift", "--spec", "US-102", "--deep"])
+    assert rc == 2
+
+
+def test_drift_deep_merges_issues(
+    patched_system: tuple[_RecordingPipeline, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When deep is available and returns drift, cheap + deep merge into one report."""
+    # Patch DeepAuditEngine to skip the binary check and inject fake issues.
+    from mnemo.audit import DriftIssue
+
+    class _FakeDeepEngine:
+        def __init__(self, pipeline, *, code_root, **_kw): pass
+        def is_available(self): return True
+        def audit_spec(self, spec_id):
+            if spec_id == "US-102":
+                return [DriftIssue(
+                    type="behavior", severity="high",
+                    description="spec says X, code does Y",
+                    suggested_action="patch",
+                )]
+            return []
+
+    monkeypatch.setattr("mnemo.audit_cli.DeepAuditEngine", _FakeDeepEngine)
+    out_file = tmp_path / "r.json"
+    rc = audit_cli.main(["drift", "--spec", "US-102", "--deep", "-o", str(out_file)])
+    # US-102 cheap was clean but deep flagged high → exit 1
+    assert rc == 1
+    payload = json.loads(out_file.read_text(encoding="utf-8"))
+    issue_types = {i["type"] for r in payload["reports"] for i in r["issues"]}
+    assert "behavior" in issue_types

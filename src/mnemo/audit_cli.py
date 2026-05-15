@@ -23,7 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from mnemo.audit import AuditEngine, DriftReport
+from mnemo.audit import AuditEngine, DriftReport, _worst_severity
+from mnemo.audit_deep import DeepAuditEngine
 from mnemo.config import load_settings
 from mnemo.factory import build_system
 from mnemo.lifecycle import LIFECYCLE_VALUES, assert_canonical
@@ -59,6 +60,20 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         if lifecycle:
             assert_canonical(lifecycle)
         reports = engine.audit_all(lifecycle=lifecycle)
+
+    if args.deep:
+        deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
+        if not deep_engine.is_available():
+            logger.error(
+                "Deep audit requested but Copilot CLI not found. "
+                "Configure MNEMO_COPILOT_BIN or omit --deep."
+            )
+            return 2
+        for r in reports:
+            deep_issues = deep_engine.audit_spec(r.spec_id)
+            if deep_issues:
+                r.issues.extend(deep_issues)
+                r.severity = _worst_severity(r.issues)
 
     payload: dict[str, Any] = {
         "project": settings.project,
@@ -144,6 +159,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_drift.add_argument(
         "-o", "--output", default=None,
         help="Write JSON report to this file. Default: human summary on stdout.",
+    )
+    p_drift.add_argument(
+        "--deep", action="store_true",
+        help=(
+            "Also run the LLM-powered behavior drift check via Copilot CLI "
+            "(one LLM call per implemented spec — slower but catches "
+            "divergences cheap checks can't see). Requires MNEMO_COPILOT_BIN "
+            "and an authenticated Copilot CLI on PATH."
+        ),
     )
     p_drift.set_defaults(func=_cmd_drift)
 

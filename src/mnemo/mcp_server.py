@@ -24,7 +24,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mnemo.audit import AuditEngine
+from mnemo.audit import AuditEngine, _worst_severity
+from mnemo.audit_deep import DeepAuditEngine
 from mnemo.config import Settings, load_settings
 from mnemo.factory import MnemoSystem, build_system
 from mnemo.lifecycle import assert_canonical as _assert_canonical_lifecycle
@@ -121,13 +122,17 @@ def get_bug(bug_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def audit_spec(spec_id: str) -> dict[str, Any]:
-    """Run the cheap drift checks against a single spec.
+def audit_spec(spec_id: str, deep: bool = False) -> dict[str, Any]:
+    """Run drift checks against a single spec.
+
+    By default runs the cheap deterministic checks (status / coverage /
+    template). Pass `deep=True` to also run the LLM-powered behavior
+    drift check via Copilot CLI — slower but catches divergences cheap
+    checks can't see.
 
     Returns a structured report with `severity` (none/low/medium/high)
     and a list of `issues`, each tagged by type (status / coverage_over
-    / coverage_under / template). Use this before modifying a sensitive
-    area to spot AS-IS / TO-BE divergence.
+    / coverage_under / template / behavior).
     """
     settings, system = _require_loaded()
     engine = AuditEngine(system.specs, code_root=settings.code_root)
@@ -137,7 +142,53 @@ def audit_spec(spec_id: str) -> dict[str, Any]:
             "spec_id": spec_id,
             "error": f"Spec {spec_id!r} not found in the active project's specs collection.",
         }
+    if deep:
+        deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
+        if not deep_engine.is_available():
+            report.issues.append(_copilot_unavailable_issue())
+        else:
+            deep_issues = deep_engine.audit_spec(spec_id)
+            if deep_issues:
+                report.issues.extend(deep_issues)
+                report.severity = _worst_severity(report.issues)
     return report.to_dict()
+
+
+@mcp.tool()
+def audit_spec_behavior(spec_id: str) -> dict[str, Any]:
+    """Run only the LLM-powered behavior drift check (deep audit).
+
+    Use this when the cheap checks already passed but you suspect the
+    code's actual behavior may have drifted from the spec semantics.
+    Requires the Copilot CLI to be installed and authenticated.
+    """
+    settings, system = _require_loaded()
+    deep_engine = DeepAuditEngine(system.specs, code_root=settings.code_root)
+    if not deep_engine.is_available():
+        return {
+            "spec_id": spec_id,
+            "error": "Copilot CLI not available — configure MNEMO_COPILOT_BIN.",
+        }
+    issues = deep_engine.audit_spec(spec_id)
+    return {
+        "spec_id": spec_id,
+        "issues": [i.to_dict() for i in issues],
+        "has_drift": bool(issues),
+        "severity": _worst_severity(issues),
+    }
+
+
+def _copilot_unavailable_issue() -> Any:
+    from mnemo.audit import DriftIssue
+    return DriftIssue(
+        type="behavior",
+        severity="low",
+        description=(
+            "Deep audit requested but Copilot CLI is not available. "
+            "Cheap-only results returned."
+        ),
+        suggested_action="Set MNEMO_COPILOT_BIN to a working Copilot CLI binary.",
+    )
 
 
 @mcp.tool()
