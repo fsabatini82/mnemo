@@ -27,6 +27,9 @@ class ChromaStore:
             metadata={"hnsw:space": "cosine"},
         )
 
+    # Chroma's rust core caps a single upsert at 5461 items; batch below that.
+    _UPSERT_BATCH = 5000
+
     def upsert(
         self,
         chunks: Sequence[Chunk],
@@ -36,12 +39,16 @@ class ChromaStore:
             raise ValueError("chunks and embeddings length mismatch")
         if not chunks:
             return
-        self._collection.upsert(
-            ids=[c.id for c in chunks],
-            documents=[c.text for c in chunks],
-            embeddings=[list(e) for e in embeddings],
-            metadatas=[{"doc_id": c.doc_id, **c.metadata} for c in chunks],
-        )
+        for start in range(0, len(chunks), self._UPSERT_BATCH):
+            end = start + self._UPSERT_BATCH
+            batch = chunks[start:end]
+            emb = embeddings[start:end]
+            self._collection.upsert(
+                ids=[c.id for c in batch],
+                documents=[c.text for c in batch],
+                embeddings=[list(e) for e in emb],
+                metadatas=[{"doc_id": c.doc_id, **c.metadata} for c in batch],
+            )
 
     def search(
         self,
