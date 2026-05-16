@@ -33,10 +33,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class MnemoSystem:
-    """Wires the consumer side: two pipelines + the source settings."""
+    """Wires the consumer side: three pipelines + the source settings."""
 
     specs: RagPipeline
     bugs: RagPipeline
+    devops: RagPipeline
     settings: Settings
     project_id: str
     environment: str
@@ -68,6 +69,7 @@ def build_system(
 
     specs_name = collection_name(project_id, env, settings.specs_collection)
     bugs_name = collection_name(project_id, env, settings.bugs_collection)
+    devops_name = collection_name(project_id, env, settings.devops_collection)
 
     if settings.pipeline == "llamaindex":
         try:
@@ -91,8 +93,15 @@ def build_system(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
         )
+        devops = LlamaIndexPipeline(
+            embed_model=settings.embed_model,
+            persist_dir=settings.persist_dir,
+            collection=devops_name,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
         return MnemoSystem(
-            specs=specs, bugs=bugs, settings=settings,
+            specs=specs, bugs=bugs, devops=devops, settings=settings,
             project_id=project_id, environment=env,
         )
 
@@ -102,6 +111,7 @@ def build_system(
     embedder = FastEmbedEmbedder(model_name=settings.embed_model)
     specs_store = _build_store(settings, dimension=embedder.dimension, collection=specs_name)
     bugs_store = _build_store(settings, dimension=embedder.dimension, collection=bugs_name)
+    devops_store = _build_store(settings, dimension=embedder.dimension, collection=devops_name)
 
     specs = DefaultPipeline(
         embedder=embedder, store=specs_store,
@@ -111,8 +121,12 @@ def build_system(
         embedder=embedder, store=bugs_store,
         chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap,
     )
+    devops = DefaultPipeline(
+        embedder=embedder, store=devops_store,
+        chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap,
+    )
     return MnemoSystem(
-        specs=specs, bugs=bugs, settings=settings,
+        specs=specs, bugs=bugs, devops=devops, settings=settings,
         project_id=project_id, environment=env,
     )
 

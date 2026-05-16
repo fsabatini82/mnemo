@@ -34,6 +34,7 @@ from mnemo.core.protocols import RagPipeline
 from mnemo.factory import build_system
 from mnemo.ingestion.agents.runner_factory import RunnerBuildError, build_runner
 from mnemo.ingestion.bugs_loader import load_bugs
+from mnemo.ingestion.devops_loader import load_devops
 from mnemo.ingestion.specs_loader import load_specs
 from mnemo.models_catalog import list_shortnames
 from mnemo.registry import ENVIRONMENTS, validate_environment, validate_slug
@@ -149,9 +150,27 @@ def _cmd_bugs(args: argparse.Namespace) -> int:
     return _ingest(system.bugs, docs, "bugs")
 
 
+def _cmd_devops(args: argparse.Namespace) -> int:
+    _apply_overrides(args)
+    settings = load_settings()
+    source: Path = args.path or settings.devops_source_dir
+    system = build_system(settings, auto_register=True)
+    logger.info(
+        "Target: project=%s (id=%s) env=%s collection=%s",
+        settings.project, system.project_id, system.environment,
+        f"{system.effective_prefix}_{settings.devops_collection}",
+    )
+    # No agentic mode for devops: the work-item shape is already
+    # structured (frontmatter + canonical sections) so deterministic
+    # parsing is the right default.
+    docs = load_devops(source)
+    return _ingest(system.devops, docs, "devops")
+
+
 def _cmd_all(args: argparse.Namespace) -> int:
     rc = _cmd_specs(args)
     rc |= _cmd_bugs(args)
+    rc |= _cmd_devops(args)
     return rc
 
 
@@ -237,7 +256,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_flags(p_bugs)
     p_bugs.set_defaults(func=_cmd_bugs)
 
-    p_all = sub.add_parser("all", help="Ingest both axes (specs + bugs).")
+    p_devops = sub.add_parser(
+        "devops",
+        help="Ingest DevOps work items (Features/PBI/open bugs) from a folder mirror.",
+    )
+    _add_common_flags(p_devops)
+    p_devops.set_defaults(func=_cmd_devops)
+
+    p_all = sub.add_parser("all", help="Ingest all axes (specs + bugs + devops).")
     _add_common_flags(p_all, hide_path=True)
     p_all.set_defaults(func=_cmd_all)
 

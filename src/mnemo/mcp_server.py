@@ -1,8 +1,10 @@
 """Mnemo MCP server — exposes organizational memory to IDE agents.
 
-Two knowledge axes:
-  • specs       — what to build (user stories, ADRs, epics)
+Three knowledge axes:
+  • specs       — what to build (user stories, ADRs, epics) — human-authored
   • bug_memory  — what went wrong before (resolved bugs with root causes)
+  • devops      — work-in-flight (Features, PBI, open bugs) mirrored from
+                  Azure DevOps; state is authoritative verbatim from DevOps
 
 Project + environment isolation: a single `mnemo-server` instance is
 scoped to one `(project, environment)` pair via CLI flags or env vars,
@@ -126,6 +128,60 @@ def query_bugs(symptom: str, k: int | None = None) -> dict[str, Any]:
 def get_bug(bug_id: str) -> dict[str, Any]:
     """Retrieve a bug by its identifier (e.g. "BUG-503")."""
     return query_bugs(bug_id, k=3)
+
+
+# ---------------------------------------------------------------------------
+# DevOps side — "what is in-flight"
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def query_devops(
+    question: str,
+    k: int | None = None,
+    state: str | None = None,
+    work_item_type: str | None = None,
+) -> dict[str, Any]:
+    """Semantic search across DevOps work items mirrored from Azure DevOps.
+
+    Covers Features, Product Backlog Items, and *open* Bugs. Resolved
+    bugs live in the `bug_memory` axis. State values are verbatim from
+    DevOps (including custom process-template values like "Validato BU"
+    or "Progettato") — pass them as-is.
+
+    Args:
+        question: Natural-language question or work-item identifier
+            (e.g. "WI-396679").
+        k: Optional override for the number of chunks to return.
+        state: Optional filter — restrict to work items whose `state`
+            metadata equals this value (verbatim DevOps state).
+        work_item_type: Optional filter — restrict to a specific type
+            (e.g. "feature", "product-backlog-item", "bug").
+    """
+    settings, system = _require_loaded()
+    where: dict[str, Any] = {}
+    if state is not None:
+        where["state"] = state
+    if work_item_type is not None:
+        where["work_item_type"] = work_item_type
+    result = system.devops.query(
+        question, k=k or settings.top_k, where=where or None,
+    )
+    return {
+        "axis": "devops",
+        "project": settings.project,
+        "environment": settings.environment,
+        "state_filter": state,
+        "work_item_type_filter": work_item_type,
+        "question": result.question,
+        "hits": [_hit_to_dict(h) for h in result.hits],
+    }
+
+
+@mcp.tool()
+def get_devops_item(work_item_id: str) -> dict[str, Any]:
+    """Retrieve a DevOps work item by its identifier (e.g. "WI-396679")."""
+    return query_devops(work_item_id, k=3)
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +462,12 @@ def mnemo_info() -> dict[str, Any]:
         "collections": {
             "specs": f"{system.effective_prefix}_{settings.specs_collection}",
             "bugs": f"{system.effective_prefix}_{settings.bugs_collection}",
+            "devops": f"{system.effective_prefix}_{settings.devops_collection}",
         },
         "sources": {
             "specs_dir": str(settings.specs_source_dir),
             "bugs_dir": str(settings.bugs_source_dir),
+            "devops_dir": str(settings.devops_source_dir),
         },
         "chunking": {
             "size": settings.chunk_size,

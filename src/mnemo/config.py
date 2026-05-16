@@ -45,10 +45,12 @@ class Settings(BaseSettings):
     # Collection axes — these are the suffixes of the final collection names.
     specs_collection: str = "specs"
     bugs_collection: str = "bug_memory"
+    devops_collection: str = "devops"
 
     # External source paths (the ingestion CLIs read from these)
     specs_source_dir: Path = Path("./assets/specs-source")
     bugs_source_dir: Path = Path("./assets/bugs-source")
+    devops_source_dir: Path = Path("./assets/devops-source")
 
     # Chunking
     chunk_size: int = Field(default=512, gt=0)
@@ -100,7 +102,7 @@ class Settings(BaseSettings):
             )
         return v
 
-    @field_validator("specs_collection", "bugs_collection")
+    @field_validator("specs_collection", "bugs_collection", "devops_collection")
     @classmethod
     def _validate_axis(cls, v: str) -> str:
         if not re.fullmatch(r"[a-z_]+", v):
